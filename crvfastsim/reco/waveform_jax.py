@@ -51,12 +51,55 @@ def pack(chan, time, charge, tdc0_of_chan, cfg=WaveformConfig(), Q=None, L=None)
     return dict(T=T, W=W, n=nq, t_start=t_start, tdc0=tdc0, keep=keep, chan=cchan, est=est, L=L, tmpl=tmpl)
 
 
-@partial(jax.jit, static_argnames=("L", "zs"))
+# oneAPI (Intel PVC): the noise draw inside the synthesis kernel intermittently aborts the Level Zero runtime
+# ("urEventWait must not be called for an internal event"); there it is drawn in its own kernel (same bits)
+SPLIT_NOISE = None   # None: decide from the backend; True/False: force
+
+
+def _split_noise():
+    if SPLIT_NOISE is not None:
+        return SPLIT_NOISE
+    from .coinc_jax import is_oneapi
+    return is_oneapi()
+
+
+@partial(jax.jit, static_argnames=("shape",))
+def _normal(key, shape):
+    return jax.random.normal(key, shape)
+
+
 def synth_dense(T, W, n, t_start, keep, tmpl, key, L, zs, precision, noise, min_voltage, adc_conv, pedestal, adc_lo,
                 adc_hi):
     """Dense waveforms, ADCs and digi starts for C clusters. T, W [C,Q]; n, t_start, keep [C].
     Only L (samples) and zs (digi length) are compile-time; noise, threshold, ADC conversion, pedestal, template
     precision and the template itself are data (a tuning knob reuses the compiled kernel)."""
+    if _split_noise():
+        eps = _normal(key, (T.shape[0], L))
+        return _synth_core(T, W, n, t_start, keep, tmpl, eps, L, zs, precision, noise, min_voltage, adc_conv,
+                           pedestal, adc_lo, adc_hi)
+    return _synth_fused(T, W, n, t_start, keep, tmpl, key, L, zs, precision, noise, min_voltage, adc_conv, pedestal,
+                        adc_lo, adc_hi)
+
+
+synth_dense._cache_size = lambda: _synth_fused._cache_size() + _synth_core._cache_size()
+
+
+@partial(jax.jit, static_argnames=("L", "zs"))
+def _synth_fused(T, W, n, t_start, keep, tmpl, key, L, zs, precision, noise, min_voltage, adc_conv, pedestal, adc_lo,
+                 adc_hi):
+    return _synth_body(T, W, n, t_start, keep, tmpl, jax.random.normal(key, (T.shape[0], L)), L, zs, precision, noise,
+                       min_voltage, adc_conv, pedestal, adc_lo, adc_hi)
+
+
+@partial(jax.jit, static_argnames=("L", "zs"))
+def _synth_core(T, W, n, t_start, keep, tmpl, eps, L, zs, precision, noise, min_voltage, adc_conv, pedestal, adc_lo,
+                adc_hi):
+    return _synth_body(T, W, n, t_start, keep, tmpl, eps, L, zs, precision, noise, min_voltage, adc_conv, pedestal,
+                       adc_lo, adc_hi)
+
+
+def _synth_body(T, W, n, t_start, keep, tmpl, eps, L, zs, precision, noise, min_voltage, adc_conv, pedestal, adc_lo,
+                adc_hi):
     C, Q = T.shape
     qmask = jnp.arange(Q)[None, :] < n[:, None]
     ts = t_start[:, None] + jnp.arange(L)[None, :] * PERIOD                       # [C, L]
@@ -66,7 +109,7 @@ def synth_dense(T, W, n, t_start, keep, tmpl, key, L, zs, precision, noise, min_
     contrib = jnp.where(ok, tmpl[jnp.clip(ti, 0, tmpl.shape[0] - 1)] * W[:, :, None], 0.0)
     wave = contrib.sum(1)
     last = jnp.where(ok, jnp.arange(L)[None, None, :] + 1, 0).max((1, 2))
-    wave = wave + noise * jax.random.normal(key, wave.shape) * (jnp.arange(L)[None, :] < last[:, None])
+    wave = wave + noise * eps * (jnp.arange(L)[None, :] < last[:, None])
     valid = jnp.arange(L)[None, :] < last[:, None]
     above = (wave > min_voltage) & valid
     pad = jnp.zeros((C, 2), bool)
