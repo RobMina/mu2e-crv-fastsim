@@ -70,7 +70,10 @@ def run(a):
     def keep_clusters(o):
         if a.save_clusters:
             saved.setdefault("clusters", []).append({k: np.asarray(v) for k, v in o[0][0].items()
-                                                     if k.startswith("cl_") and k != "cl_pulses"} if o[0] else {})
+                                                     if k.startswith("cl_")} if o[0] else {})
+            if a.detail:
+                cat = lambda k: np.concatenate([c["pulses"][k] for c in o[0]]) if o[0] else np.zeros(0)
+                saved.setdefault("pulses", []).append({k: cat(k) for k in ("ev", "idx", "bar", "sipm", "seq", "pe", "time")})
         return o[0]
 
     if a.detail:   # clusters with positions (cl_pos) and member tables, as the benchmark runs them
@@ -102,6 +105,8 @@ def run(a):
             if a.save_clusters:
                 Path(a.save_clusters).mkdir(parents=True, exist_ok=True)
                 np.savez(Path(a.save_clusters) / f"clusters_{s}.npz", **saved["clusters"][0])
+                if a.detail:
+                    np.savez(Path(a.save_clusters) / f"pulses_{s}.npz", **saved["pulses"][0])
     finally:
         for p in patches:
             p.stop()
