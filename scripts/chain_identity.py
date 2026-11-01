@@ -120,23 +120,39 @@ def compare(a):
 
 
 def clusters(a):
-    """Cluster lists of two runs (--save-clusters dirs): counts and integer fields exact, float fields max |diff|."""
-    out, worst = {}, {}
+    """Cluster lists of two runs (--save-clusters dirs). Shards are aligned per (event, sector type) cell with the same
+    number of clusters in both runs (in their stored order); reported: cells/clusters kept and dropped, integer
+    mismatches, and per float field the max and RMS |difference| over aligned clusters (cl_pos per component)."""
+    tot = {"aligned": 0, "dropped_a": 0, "dropped_b": 0, "integer_mismatch": 0}
+    diffs = {}
+    same_all = True
     for f in sorted(Path(a.a).glob("clusters_*.npz")):
         x, y = np.load(f), np.load(Path(a.b) / f.name)
-        r = {"clusters": [len(x["cl_event"]), len(y["cl_event"])]}
-        if len(x["cl_event"]) == len(y["cl_event"]):
-            for k in x.files:
-                if x[k].dtype.kind in "iub":
-                    r.setdefault("integer_mismatch", {})[k] = int((x[k] != y[k]).sum())
-                else:
-                    d = float(np.nanmax(np.abs(x[k] - y[k]), initial=0))
-                    r.setdefault("max_abs", {})[k] = d
-                    worst[k] = max(worst.get(k, 0), d)
-        out[f.stem] = r
-    same = all(r["clusters"][0] == r["clusters"][1] and not any(r.get("integer_mismatch", {}).values())
-               for r in out.values())
-    print(json.dumps({"files": len(out), "same_lists": same, "max_abs": worst, "per_file": out}, indent=1))
+        kx = x["cl_event"].astype(np.int64) * 10 + x["cl_type"].astype(np.int64)
+        ky = y["cl_event"].astype(np.int64) * 10 + y["cl_type"].astype(np.int64)
+        ux, cx = np.unique(kx, return_counts=True)
+        uy, cy = np.unique(ky, return_counts=True)
+        common, ix, iy = np.intersect1d(ux, uy, return_indices=True)
+        good = set(common[cx[ix] == cy[iy]].tolist())
+        mx = np.array([k in good for k in kx], bool)
+        my = np.array([k in good for k in ky], bool)
+        ox, oy = np.flatnonzero(mx)[np.argsort(kx[mx], kind="stable")], np.flatnonzero(my)[np.argsort(ky[my], kind="stable")]
+        same_all &= len(kx) == len(ky) and mx.all() and my.all()
+        tot["aligned"] += len(ox)
+        tot["dropped_a"] += int((~mx).sum())
+        tot["dropped_b"] += int((~my).sum())
+        for k in x.files:
+            if x[k].dtype.kind in "iub":
+                tot["integer_mismatch"] += int((x[k][ox] != y[k][oy]).sum())
+            else:
+                d = np.abs(x[k][ox] - y[k][oy]).reshape(len(ox), -1)
+                for c in range(d.shape[1]):
+                    diffs.setdefault(f"{k}[{c}]" if d.shape[1] > 1 else k, []).append(d[:, c])
+    stats = {k: {"max": float(np.max(np.concatenate(v), initial=0)),
+                 "rms": float(np.sqrt(np.mean(np.concatenate(v) ** 2))) if sum(map(len, v)) else 0.0,
+                 "changed": int((np.concatenate(v) > 0).sum())} for k, v in diffs.items()}
+    same = same_all and tot["integer_mismatch"] == 0
+    print(json.dumps({"same_lists": same, **tot, "float": stats}, indent=1))
     return 0 if same else 1
 
 
