@@ -12,7 +12,7 @@ import pandas as pd
 
 from crvfastsim import geometry, tables, tier1b as T, tier1b_assets
 from crvfastsim.tier1b_jax import DeviceRandom, DeviceTier1b, ReplayRandom
-from . import descendant_audit as A, descendant_topology as D, device_tier1b_moments as M, placement_closure as P, stephist as H, steplayers as S
+from . import deck_rule as R, descendant_audit as A, descendant_topology as D, device_tier1b_moments as M, placement_closure as P, stephist as H, steplayers as S
 
 
 class RecordRandom:
@@ -133,9 +133,11 @@ def run(args):
     hashes = {str(p): A.digest(p) for p in [*spec.paths(), T.__file__, __file__,
                                          *[Path(T.__file__).with_name(f"tier1b{suffix}.py") for suffix in ("_jax", "_metadata_jax", "_csr_jax", "_hard_jax")]]}
     edges = S.booking_edges()
-    hist, pair, topo = {n: {} for n in ("numpy", "jax")}, {}, {n: {} for n in ("numpy", "jax")}
+    names = ("numpy", "jax") + (("numpy_reseed",) if args.floor_seed is not None else ())
+    hist, pair, topo = {n: {} for n in names}, {}, {n: {} for n in names}
+    floor_pair = {}
     records = []
-    moments, layer_pairs = {n: {} for n in ("numpy", "jax")}, {}
+    moments, layer_pairs = {n: {} for n in names}, {}
     component_pairs = {c: {} for c in H.COMPONENTS[1:]}
     for shard in args.shards:
         path = str(Path(args.transport) / f"fastC.{S.shard(shard)}.root")
@@ -169,10 +171,13 @@ def run(args):
         if not args.replay_only:
             events = gen[tables.KEY].drop_duplicates()
             arms, labels_of = {}, {}
-            for name, rng in (("numpy", np.random.default_rng([shard, 1000])), ("jax", DeviceRandom(shard))):
+            streams = [("numpy", np.random.default_rng([shard, 1000])), ("jax", DeviceRandom(shard))]
+            if args.floor_seed is not None:
+                streams.append(("numpy_reseed", np.random.default_rng([shard, args.floor_seed])))
+            for name, rng in streams:
                 tick = time.perf_counter()
-                steps, parts, info = (T.sample(st, pa, gen, lib, geom, rng, **spec.options) if name == "numpy"
-                                      else dev.sample(st, pa, gen, rng, **spec.options))
+                steps, parts, info = (dev.sample(st, pa, gen, rng, **spec.options) if name == "jax"
+                                      else T.sample(st, pa, gen, lib, geom, rng, **spec.options))
                 elapsed = time.perf_counter() - tick
                 hh, idx = H.fill(steps[H.STEP_COLS], parts, events, edges)
                 H.add(hist[name], hh)
@@ -189,6 +194,8 @@ def run(args):
                     tables.write(str(dest / Path(path).name.replace("fastC.", "fast1b.")), steps, parts, gen,
                                  tables.read(path, "subruns"), as_ttree=True)
             H.add_paired(pair, H.paired(arms["numpy"], arms["jax"], edges))
+            if "numpy_reseed" in arms:
+                H.add_paired(floor_pair, H.paired(arms["numpy"], arms["numpy_reseed"], edges))
             for component in component_pairs:
                 filtered = {name: {k: (ev[c == component], b[c == component], c[c == component])
                                    for k, (ev, b, c) in idx.items()} for name, idx in arms.items()}
@@ -198,10 +205,17 @@ def run(args):
         records.append(record)
         print(json.dumps(record), flush=True)
     comparison = H.compare(hist["numpy"], hist["jax"], pair) if hist["numpy"] else {}
+    floor_arm = hist.get("numpy_reseed") or None
+    deck = (R.compare(hist["numpy"], hist["jax"], hist["numpy"] if floor_arm else None, floor_arm)
+            if hist["numpy"] else {})
+    floor_comparison = H.compare(hist["numpy"], floor_arm, floor_pair) if floor_arm else {}
     print(json.dumps({"comparison": comparison, "moments": {n: M.summarize(v) for n, v in moments.items()}
                       if not args.replay_only else {}}), flush=True)
     result = dict(records=records, tier1b=spec.describe(), hashes=hashes, library_load_s=load_s, device_prepare_s=dev.preparation_s,
                   comparison=comparison, flagged=[k for k, v in comparison.items() if v.get("flag")],
+                  deck_rule=deck, deck_rule_flagged=sorted(k for k, v in deck.items() if v["flag"]),
+                  floor_comparison=floor_comparison, floor_seed=args.floor_seed,
+                  floor_paired={k: v.tolist() for k, v in floor_pair.items()},
                   layer_census=A.summarize(layer_pairs),
                   component_yields={k: {c: H.yield_stat(hist["numpy"][k], hist["jax"][k], c, component_pairs[c].get(k))
                                             for c in component_pairs} for k in hist["numpy"] if k.startswith("_total")},
@@ -229,6 +243,7 @@ def main():
     p.add_argument("--warm-repeats", type=int, default=0)
     p.add_argument("--warm-shards", type=int, nargs="+", help="Time only these shards; every requested shard is still replayed")
     p.add_argument("--write", action="store_true")
+    p.add_argument("--floor-seed", type=int, help="also run a reseeded NumPy arm ([shard, seed]) as the deck-rule floor")
     run(p.parse_args())
 
 
