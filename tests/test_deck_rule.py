@@ -47,3 +47,25 @@ def test_compare_applies_k_exact_and_floor():
     assert floor["bar"]["floor_chi2ndf"] == pytest.approx((1600 / 240 + 1600 / 160) / 3)
     assert floor["bar"]["threshold"] == pytest.approx(3 * floor["bar"]["floor_chi2ndf"])
     assert not floor["bar"]["flag"]
+
+
+# deck "fast steps vs Geant4" (A1 vs A0g), 5 M generated events, held-out even shards 22-220: published chi2/ndf
+PUBLISHED_A1_VS_A0G = {"bar": 12.145913338526658, "t": 0.3966694772941791, "t2": 0.2957520690372576,
+                       "lt": 0.31728624684066337, "E": 1.297026479312759, "lE": 3.0436608735870117,
+                       "SMom": 1.0885608433070424, "SMom2": 0.40812505964996004, "pathLen": 2.0660684064087516,
+                       "NStep": 2.935183115229301}
+PUBLISHED_K = [86.75045952338229, 84.23026416743339]
+PUBLISHED_FLAGS = {"bar", "lE", "pathLen", "NStep"}
+
+
+def test_reproduces_published_deck_values():
+    import json
+    from pathlib import Path
+    d = json.loads((Path(__file__).parent / "data" / "deck_steps_a1_vs_a0g.json").read_text())
+    ref, cand = ({k: _acc(v) for k, v in d[arm].items()} for arm in ("ref", "cand"))
+    res = R.compare(ref, cand)
+    for k, v in PUBLISHED_A1_VS_A0G.items():
+        assert res[k]["chi2ndf"] == pytest.approx(v, rel=1e-9), k
+    for k in ("t", "t2", "lt"):
+        assert res[k]["k"] == pytest.approx(PUBLISHED_K, rel=1e-12)
+    assert {k for k, v in res.items() if v["flag"]} == PUBLISHED_FLAGS

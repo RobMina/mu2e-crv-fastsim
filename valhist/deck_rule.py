@@ -11,7 +11,8 @@ chi2/ndf > max(2, 3 x floor), where the floor is the same statistic for a pair t
 
 The lowest bin of E, SMom and SMom2 is left out. `stephist.compare` keeps its own "deck" field (Poisson for every
 non-y/z key); this module reproduces the deck's variance choices so a step-level comparison can be read against the
-deck's threshold.
+deck's threshold. `tests/test_deck_rule.py` checks it against the deck's published fast-steps vs Geant4 values on
+the merged ValCrvStep histograms in `tests/data/` (written by `scripts/deck_step_fixture.py`).
 
     python -m valhist.deck_rule SUMMARY.json [--ref numpy --cand jax --floor-ref numpy --floor-cand numpy_reseed] \
         [--out OUT.json]
@@ -79,6 +80,18 @@ def compare(ref, cand, floor_ref=None, floor_cand=None):
         r["threshold"] = max(2.0, 3.0 * floor) if floor is not None else 2.0
         r["flag"] = value is not None and value > r["threshold"]
         out[key] = r
+    return out
+
+
+def read_valcrvstep(path, directory="Validation/CrvSteps_steps_noName", keys=tuple(H.BOOK)):
+    """Accumulators {key: {"all": (n, n)}} from a merged ValCrvStep ROOT file (flow-inclusive counts; no per-event
+    second moments, so only the Poisson and clustering-factor keys are meaningful)."""
+    import uproot
+    out = {}
+    with uproot.open(path) as f:
+        for k in keys:
+            n = f[f"{directory}/{k}"].values(flow=True).astype(float)
+            out[k] = {"all": (n, n.copy())}
     return out
 
 
