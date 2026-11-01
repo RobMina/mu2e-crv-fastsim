@@ -85,6 +85,8 @@ def main():
     p.add_argument("--transport-backend", choices=("numpy", "jax"), default="numpy")
     p.add_argument("--tier1b-backend", choices=("numpy", "jax"), default="numpy")
     p.add_argument("--passes", type=int, default=1, help="runchain passes in this process (setup repeated each pass)")
+    p.add_argument("--deep", nargs="*", default=[], help="also wrap every function defined in these modules "
+                   "(e.g. crvfastsim.tier1b); summarised per function as the largest peak above its entry RSS")
     a = p.parse_args()
     root, out = Path(a.inputs_root), Path(a.outdir)
     out.mkdir(parents=True, exist_ok=False)
@@ -97,9 +99,17 @@ def main():
     if a.transport_backend == "jax":
         from crvfastsim import transport_jax
         targets += [(transport_jax.DeviceTransport, "__init__"), (transport_jax, "transport")]
+    import importlib
+    import inspect
+    deep = []
+    for name in a.deep:
+        mod = importlib.import_module(name)
+        deep += [(mod, f) for f, v in vars(mod).items()
+                 if inspect.isfunction(v) and v.__module__ == name and (mod, f) not in targets]
+    deep_names = {f"{m.__name__}.{f}" for m, f in deep}
     from contextlib import ExitStack
     with ExitStack() as stack:
-        for obj, name in targets:
+        for obj, name in targets + deep:
             stack.enter_context(patch.object(obj, name, wrap(records, getattr(obj, name), f"{obj.__name__}.{name}")))
         passes = []
         for i in range(a.passes):
@@ -113,10 +123,24 @@ def main():
                                transport_backend=a.transport_backend, tier1b_backend=a.tier1b_backend)
             passes.append({"seconds": time.perf_counter() - start, "generated_events": res["generated_events"],
                            "clusters_per_generated": res["clusters_per_generated"]})
-    result = {"args": vars(a), "passes": passes, "records": records, "process_peak": _status("VmHWM"),
+    summary = {}
+    for r in records:
+        if r.get("peak_during") is None:
+            continue
+        x = summary.setdefault(r["stage"], {"calls": 0, "seconds": 0.0, "max_peak_above_entry": 0, "max_peak": 0})
+        x["calls"] += 1
+        x["seconds"] += r["seconds"]
+        x["max_peak_above_entry"] = max(x["max_peak_above_entry"], r["peak_during"] - r["rss_before"])
+        x["max_peak"] = max(x["max_peak"], r["peak_during"])
+    result = {"args": vars(a), "passes": passes, "summary": summary, "records": records, "process_peak": _status("VmHWM"),
               "device_final": _device()}
     (out / "memory.json").write_text(json.dumps(result, indent=1))
+    for k, x in sorted(summary.items(), key=lambda kv: -kv[1]["max_peak_above_entry"])[:40]:
+        print(f"{k:55s} calls {x['calls']:5d} {x['seconds']:8.2f} s  peak above entry "
+              f"{x['max_peak_above_entry'] / 2 ** 30:6.3f} GiB  peak {x['max_peak'] / 2 ** 30:6.3f} GiB")
     for r in records:
+        if r["stage"] in deep_names:
+            continue
         g = lambda k: None if r.get(k) is None else round(r[k] / 2 ** 30, 3)
         dv = r.get("device_after") or {}
         print(f"{r['stage']:40s} rss {g('rss_before')} -> {g('rss_after')} GiB, peak {g('peak_during')} GiB, "
