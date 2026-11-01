@@ -3,7 +3,7 @@
 Union of the device-side events per device process, overall and inside each annotated host stage (stage:<name>),
 against the stage wall time: the fraction of a stage the accelerator is idle is host work or transfer waits.
 
-    python3 scripts/trace_device_busy.py TRACE.json.gz [--out OUT.json]
+    python3 scripts/trace_device_busy.py TRACE.json.gz [--phases device_memory.json] [--out OUT.json]
 """
 import argparse
 import gzip
@@ -32,7 +32,7 @@ def clip(iv, a, b):
     return [(max(s, a), min(e, b)) for s, e in iv if e > a and s < b]
 
 
-def analyse(path):
+def analyse(path, phases=None):
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt") as f:
         d = json.load(f)
@@ -57,15 +57,30 @@ def analyse(path):
         r["device_busy_s"] += union_length(clip(dev, a, b)) * 1e-6
         r["calls"] += 1
     out["stages"] = per
+    if phases:
+        iv = json.loads(Path(phases).read_text())["phase_intervals_monotonic"]
+        shift = max(e for _, e in dev) - max(p["end_ns"] for p in iv) / 1e3
+        per = {}
+        for p in iv:
+            a, b = p["start_ns"] / 1e3 + shift, p["end_ns"] / 1e3 + shift
+            r = per.setdefault(p["name"], {"wall_s": 0.0, "device_busy_s": 0.0, "calls": 0})
+            r["wall_s"] += (b - a) * 1e-6
+            r["device_busy_s"] += union_length(clip(dev, a, b)) * 1e-6
+            r["calls"] += 1
+        out["phases_aligned_at_last_device_event"] = per
+        first = min(p["start_ns"] for p in iv) / 1e3 + shift
+        out["before_first_phase_device_busy_s"] = union_length(clip(dev, lo, first)) * 1e-6
     return out
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("trace")
+    p.add_argument("--phases", help="device_memory.json of the same pass (monotonic stage intervals, aligned at the "
+                   "last device event)")
     p.add_argument("--out")
     a = p.parse_args()
-    res = analyse(a.trace)
+    res = analyse(a.trace, a.phases)
     text = json.dumps(res, indent=1)
     if a.out:
         Path(a.out).write_text(text)
