@@ -73,11 +73,35 @@ def check_metadata(dev, st):
     return dict(crossings=n, visits=int(take.sum()), exact=True, hard=hard_info)
 
 
-def replay(dev, st, pa, gen, opts, seed):
+def replay_report(host, device):
+    """Fixed-uniform replay agreement without asserting (reduced device precision): row counts, discrete mismatches
+    and floating differences per column when the tables line up."""
+    out = {}
+    for name, a, b in (("steps", host[0], device[0]), ("particles", host[1], device[1])):
+        r = {"rows_host": len(a), "rows_device": len(b)}
+        if len(a) == len(b):
+            r["integer_mismatch"] = {c: int((a[c].to_numpy() != b[c].to_numpy()).sum()) for c in a
+                                     if a[c].dtype.kind in "iub" and c in b}
+            r["max_abs"] = {c: float(np.nanmax(np.abs(a[c].to_numpy() - b[c].to_numpy()), initial=0))
+                            for c in a if a[c].dtype.kind == "f" and c in b}
+        out[name] = r
+    return out
+
+
+def replay(dev, st, pa, gen, opts, seed, check="strict"):
     rng = RecordRandom(seed)
     tick = time.perf_counter()
     host = T.sample(st, pa, gen, dev.lib, dev.geom, rng, **opts)
     host_s = time.perf_counter() - tick
+    if check == "report":   # device uniforms are the recorded float64 draws; only device arithmetic differs
+        rr = ReplayRandom(rng.draws)
+        tick = time.perf_counter()
+        try:
+            device = dev.sample(st, pa, gen, rr, **opts)
+        except ValueError as e:   # a discrete outcome changed the number or shape of later draws
+            return dict(host_s=host_s, device_s=time.perf_counter() - tick, error=str(e))
+        return dict(host_s=host_s, device_s=time.perf_counter() - tick, report=replay_report(host, device),
+                    draws_used=rr.index, draws_recorded=len(rng.draws))
     rr = ReplayRandom(rng.draws)
     tick = time.perf_counter()
     device = dev.sample(st, pa, gen, rr, **opts)
@@ -144,8 +168,13 @@ def run(args):
         st, pa, gen = (tables.read(path, tree) for tree in ("steps", "particles", "gen"))
         hashes[path] = A.digest(path)
         record = dict(shard=shard, events=len(gen[tables.KEY].drop_duplicates()), input_steps=len(st))
-        record["metadata"] = check_metadata(dev, st)
-        record["replay"] = replay(dev, st, pa, gen, spec.options, [shard, 1000])
+        try:
+            record["metadata"] = check_metadata(dev, st)
+        except AssertionError as e:
+            if args.replay_check == "strict":
+                raise
+            record["metadata"] = dict(exact=False, error=str(e)[:2000])
+        record["replay"] = replay(dev, st, pa, gen, spec.options, [shard, 1000], args.replay_check)
         if args.warm_repeats and (args.warm_shards is None or shard in args.warm_shards):
             record["warmup"] = {}
             for backend in ("numpy", "jax"):
@@ -211,7 +240,12 @@ def run(args):
     floor_comparison = H.compare(hist["numpy"], floor_arm, floor_pair) if floor_arm else {}
     print(json.dumps({"comparison": comparison, "moments": {n: M.summarize(v) for n, v in moments.items()}
                       if not args.replay_only else {}}), flush=True)
-    result = dict(records=records, tier1b=spec.describe(), hashes=hashes, library_load_s=load_s, device_prepare_s=dev.preparation_s,
+    try:
+        from mu2efastsim import precision as dprec
+        precision = dprec.provenance()
+    except ImportError:   # before the precision setting existed the device kernels were float64
+        precision = {"device_float": "float64"}
+    result = dict(records=records, tier1b=spec.describe(), hashes=hashes, precision=precision, library_load_s=load_s, device_prepare_s=dev.preparation_s,
                   comparison=comparison, flagged=[k for k, v in comparison.items() if v.get("flag")],
                   deck_rule=deck, deck_rule_flagged=sorted(k for k, v in deck.items() if v["flag"]),
                   floor_comparison=floor_comparison, floor_seed=args.floor_seed,
@@ -240,6 +274,8 @@ def main():
     p.add_argument("--tier1b-set", choices=("strict_v4",), default="strict_v4")
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--replay-only", action="store_true")
+    p.add_argument("--replay-check", choices=("strict", "report"), default="strict",
+                   help="report: record replay agreement without asserting round-off equality (float32 device)")
     p.add_argument("--warm-repeats", type=int, default=0)
     p.add_argument("--warm-shards", type=int, nargs="+", help="Time only these shards; every requested shard is still replayed")
     p.add_argument("--write", action="store_true")
