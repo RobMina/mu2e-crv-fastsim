@@ -33,6 +33,11 @@ def main():
         print("replay report:", len(rep), "shards; steps host", sum(r["steps"]["rows_host"] for r in rep), "device",
               sum(r["steps"]["rows_device"] for r in rep), "; shards with a changed draw count",
               sum("error" in r for r in rr), "; metadata exact on", sum(bool(r["metadata"].get("exact")) for r in d["records"]))
+        same = [r["steps"] for r in rep if "integer_mismatch" in r["steps"]]
+        rows = sum(r["rows_host"] for r in same)
+        for c in ("bar", "sp", "nstep"):
+            bad = sum(r["integer_mismatch"].get(c, 0) for r in same)
+            print(f"  equal-length shards {len(same)}: {c} differs on {bad} of {rows} steps ({bad / max(rows, 1):.3e})")
     mom = d.get("moments") or {}
     for arm, m in mom.items():
         print("moments", arm, {k: v for k, v in m.items() if not isinstance(v, (list, dict))})
