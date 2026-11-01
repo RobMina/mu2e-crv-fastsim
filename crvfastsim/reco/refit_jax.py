@@ -10,7 +10,11 @@ import dataclasses
 
 import numpy as np
 
+from mu2efastsim import precision as dprec
+
 from . import pulsefit_jax as PJ
+
+dprec.register(__name__)   # JAX creators here follow MU2EFS_DEVICE_FLOAT
 
 
 def _bucket(n, lo):
