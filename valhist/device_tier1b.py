@@ -85,6 +85,12 @@ def replay_report(host, device):
             r["max_abs"] = {c: float(np.nanmax(np.abs(a[c].to_numpy() - b[c].to_numpy()), initial=0))
                             for c in a if a[c].dtype.kind == "f" and c in b}
         out[name] = r
+    key = lambda f: pd.Series(1, index=pd.MultiIndex.from_arrays([f[c].to_numpy() for c in T.KEY] + [f.bar.to_numpy()])
+                              ).groupby(level=list(range(len(T.KEY) + 1))).size()
+    if len(host[0]) and len(device[0]):   # order-free: steps whose (event, bar) cell changed, as half the L1 distance
+        a, b = key(host[0]), key(device[0])
+        diff = a.sub(b, fill_value=0).abs().sum() / 2
+        out["steps"]["moved_event_bar"] = float(diff)
     return out
 
 
