@@ -11,8 +11,8 @@ chi2/ndf > max(2, 3 x floor), where the floor is the same statistic for a pair t
 
 The lowest bin of E, SMom and SMom2 is left out. `stephist.compare` keeps its own "deck" field (Poisson for every
 non-y/z key); this module reproduces the deck's variance choices so a step-level comparison can be read against the
-deck's threshold. `tests/test_deck_rule.py` checks it against the deck's published fast-steps vs Geant4 values on
-the merged ValCrvStep histograms in `tests/data/` (written by `scripts/deck_step_fixture.py`).
+deck's threshold. It reproduces the deck's published fast-steps vs Geant4 statistics to 1e-9 when given the deck's
+merged ValCrvStep histograms (`read_valcrvstep`); the unit tests use synthetic accumulators.
 
     python -m valhist.deck_rule SUMMARY.json [...] [--ref numpy --cand jax] [--floor-ref numpy --floor-cand numpy_reseed
         [--floor-summary FLOOR.json ...]] [--out OUT.json]

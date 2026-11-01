@@ -280,13 +280,21 @@ def main():
     p.add_argument("--tier1b-set", choices=("strict_v4",), default="strict_v4")
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--replay-only", action="store_true")
-    p.add_argument("--replay-check", choices=("strict", "report"), default="strict",
-                   help="report: record replay agreement without asserting round-off equality (float32 device)")
+    p.add_argument("--replay-check", choices=("strict", "report"),
+                   help="strict: assert round-off equality (default with float64 device kernels); report: record the "
+                        "agreement only (default with float32 device kernels)")
     p.add_argument("--warm-repeats", type=int, default=0)
     p.add_argument("--warm-shards", type=int, nargs="+", help="Time only these shards; every requested shard is still replayed")
     p.add_argument("--write", action="store_true")
     p.add_argument("--floor-seed", type=int, help="also run a reseeded NumPy arm ([shard, seed]) as the deck-rule floor")
-    run(p.parse_args())
+    args = p.parse_args()
+    if args.replay_check is None:
+        try:
+            from mu2efastsim import precision as dprec
+            args.replay_check = "report" if dprec.SINGLE else "strict"
+        except ImportError:
+            args.replay_check = "strict"
+    run(args)
 
 
 if __name__ == "__main__":
