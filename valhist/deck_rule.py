@@ -14,8 +14,8 @@ non-y/z key); this module reproduces the deck's variance choices so a step-level
 deck's threshold. `tests/test_deck_rule.py` checks it against the deck's published fast-steps vs Geant4 values on
 the merged ValCrvStep histograms in `tests/data/` (written by `scripts/deck_step_fixture.py`).
 
-    python -m valhist.deck_rule SUMMARY.json [--ref numpy --cand jax --floor-ref numpy --floor-cand numpy_reseed] \
-        [--out OUT.json]
+    python -m valhist.deck_rule SUMMARY.json [...] [--ref numpy --cand jax] [--floor-ref numpy --floor-cand numpy_reseed
+        [--floor-summary FLOOR.json ...]] [--out OUT.json]
 """
 import argparse
 import json
@@ -95,29 +95,44 @@ def read_valcrvstep(path, directory="Validation/CrvSteps_steps_noName", keys=tup
     return out
 
 
-def from_summary(path, arms):
-    d = json.loads(Path(path).read_text())
-    return {a: H.from_json(d["hists"][a]) if a is not None else None for a in arms}
+def from_summaries(paths, arms):
+    """Per arm, the stephist accumulators summed over the summary JSONs (disjoint shard sets)."""
+    out = {a: {} for a in arms}
+    shards = []
+    for path in paths:
+        d = json.loads(Path(path).read_text())
+        shards += list(d.get("shards") or [r["shard"] for r in d.get("records", [])])
+        for a in arms:
+            H.add(out[a], H.from_json(d["hists"][a]))
+    if len(set(shards)) != len(shards):
+        raise ValueError("summaries overlap in shards")
+    return out, sorted(shards)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("summary", help="JSON with hists.<arm> stephist accumulators (device_tier1b summary)")
+    p.add_argument("summary", nargs="+", help="JSONs with hists.<arm> stephist accumulators (disjoint shards)")
     p.add_argument("--ref", default="numpy")
     p.add_argument("--cand", default="jax")
     p.add_argument("--floor-ref")
     p.add_argument("--floor-cand")
-    p.add_argument("--floor-summary", help="read the floor arms from this JSON instead of SUMMARY")
+    p.add_argument("--floor-summary", nargs="+", help="read the floor arms from these JSONs instead of SUMMARY")
     p.add_argument("--out")
     a = p.parse_args()
-    arms = from_summary(a.summary, (a.ref, a.cand))
-    floor = (None, None)
+    arms, shards = from_summaries(a.summary, (a.ref, a.cand))
+    floor, floor_shards = (None, None), None
     if a.floor_ref and a.floor_cand:
-        f = from_summary(a.floor_summary or a.summary, (a.floor_ref, a.floor_cand))
+        f, floor_shards = from_summaries(a.floor_summary or a.summary, (a.floor_ref, a.floor_cand))
         floor = (f[a.floor_ref], f[a.floor_cand])
+        if floor_shards != shards:
+            raise ValueError("floor and comparison cover different shards")
     res = compare(arms[a.ref], arms[a.cand], *floor)
-    result = {"summary": a.summary, "ref": a.ref, "cand": a.cand, "floor": [a.floor_ref, a.floor_cand],
+    result = {"summaries": a.summary, "floor_summaries": a.floor_summary, "shards": shards, "ref": a.ref,
+              "cand": a.cand, "floor": [a.floor_ref, a.floor_cand],
               "flagged": sorted(k for k, v in res.items() if v["flag"]), "per_hist": res}
+    if a.floor_summary and a.floor_ref == a.ref:
+        result["ref_identical_in_floor"] = all(np.array_equal(arms[a.ref][k]["all"][0], floor[0][k]["all"][0])
+                                               for k in arms[a.ref])
     text = json.dumps(result, indent=1, allow_nan=False)
     if a.out:
         if Path(a.out).exists():
@@ -126,7 +141,7 @@ def main():
     for k, v in res.items():
         print(f"{k:10s} {v['variance']:12s} chi2/ndf {v['chi2ndf'] if v['chi2ndf'] is None else round(v['chi2ndf'], 4)}"
               f"  floor {v['floor_chi2ndf']}  threshold {v['threshold']:.3f}  {'FLAG' if v['flag'] else ''}")
-    print("flagged:", result["flagged"])
+    print("flagged:", result["flagged"], "ref identical in floor:", result.get("ref_identical_in_floor"))
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--trace-pass", type=int)
     parser.add_argument("--reco-cpu", action="store_true")
     parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--transport-backend", choices=("numpy", "jax"), default="numpy")
+    parser.add_argument("--tier1b-backend", choices=("numpy", "jax"), default="numpy")
     parser.add_argument("--alternate-audit", action="store_true",
                         help="alternate 1/4 workers inside one prepared process; retain exact repeat checks")
     args = parser.parse_args()
@@ -57,7 +59,8 @@ def main():
                    gdml=str(root / "data/geometry/mu2e_extracted_v04.gdml"),
                    tier1b_set="strict_v4", tier1b_dir=str(root / "tier1b_strict_v2"),
                    jax=not args.cpu, max_events=args.max_events, prefetch=args.prefetch,
-                   reco_cpu=args.reco_cpu)
+                   reco_cpu=args.reco_cpu, transport_backend=args.transport_backend,
+                   tier1b_backend=args.tier1b_backend)
     inputs = [str(root / f"gen_even/gen.001400_{shard:08d}.root") for shard in args.shards]
     prepare = runchain.prepare
     run = runchain.run
