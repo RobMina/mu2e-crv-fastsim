@@ -70,9 +70,14 @@ def run(a):
     def keep_clusters(o):
         if a.save_clusters:
             saved.setdefault("clusters", []).append({k: np.asarray(v) for k, v in o[0][0].items()
-                                                     if k.startswith("cl_")} if o[0] else {})
+                                                     if k.startswith("cl_") and k != "cl_pulses"} if o[0] else {})
         return o[0]
 
+    if a.detail:   # clusters with positions (cl_pos) and member tables, as the benchmark runs them
+        f_clusters = chain.clusters
+        detail_patch = patch.object(chain, "clusters", functools.wraps(f_clusters)(
+            lambda *args, **kw: f_clusters(*args, **{**kw, "detail": True})))
+        detail_patch.start()
     patches = [wrap(tier1b, "sample", "tier1b", lambda o: o[:2]), wrap(chain, "charges", "charges", lambda o: o),
                wrap(chain, "digis", "digis", lambda o: o), wrap(chain, "reco_waveforms", "reco_waveforms", lambda o: o),
                wrap(chain, "clusters", "clusters", keep_clusters)]
@@ -100,6 +105,8 @@ def run(a):
     finally:
         for p in patches:
             p.stop()
+        if a.detail:
+            detail_patch.stop()
     with open(a.out, "x") as f:
         json.dump({"args": vars(a), "shards": record}, f, indent=1)
 
@@ -151,7 +158,7 @@ def clusters(a):
     stats = {k: {"max": float(np.max(np.concatenate(v), initial=0)),
                  "rms": float(np.sqrt(np.mean(np.concatenate(v) ** 2))) if sum(map(len, v)) else 0.0,
                  "changed": int((np.concatenate(v) > 0).sum())} for k, v in diffs.items()}
-    same = same_all and tot["integer_mismatch"] == 0
+    same = bool(same_all) and tot["integer_mismatch"] == 0
     print(json.dumps({"same_lists": same, **tot, "float": stats}, indent=1))
     return 0 if same else 1
 
@@ -169,6 +176,7 @@ def main():
     r.add_argument("--transport-backend", choices=("numpy", "jax"), default="numpy")
     r.add_argument("--tier1b-backend", choices=("numpy", "jax"), default="numpy")
     r.add_argument("--save-clusters", help="also write each shard's cluster list (cl_* arrays) to this directory")
+    r.add_argument("--detail", action="store_true", help="run the cluster stage with detail=True (adds cl_pos)")
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")
