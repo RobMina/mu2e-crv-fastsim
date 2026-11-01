@@ -5,6 +5,7 @@ hashes every returned table column (dtype, shape, bytes). `compare` reports the 
 
     python3 scripts/chain_identity.py run --inputs-root ROOT --out A.json --shards 22 24 ... [--jax ...]
     python3 scripts/chain_identity.py compare A.json B.json
+    python3 scripts/chain_identity.py clusters DIR_A DIR_B      (lists saved with run --save-clusters)
 """
 import argparse
 import functools
@@ -64,9 +65,17 @@ def run(a):
             return out
         return patch.object(obj, name, call)
 
+    saved = {}
+
+    def keep_clusters(o):
+        if a.save_clusters:
+            saved.setdefault("clusters", []).append({k: np.asarray(v) for k, v in o[0][0].items()
+                                                     if k.startswith("cl_")} if o[0] else {})
+        return o[0]
+
     patches = [wrap(tier1b, "sample", "tier1b", lambda o: o[:2]), wrap(chain, "charges", "charges", lambda o: o),
                wrap(chain, "digis", "digis", lambda o: o), wrap(chain, "reco_waveforms", "reco_waveforms", lambda o: o),
-               wrap(chain, "clusters", "clusters", lambda o: o[0])]
+               wrap(chain, "clusters", "clusters", keep_clusters)]
     if a.tier1b_backend == "jax":
         from crvfastsim import tier1b_jax
         patches.append(wrap(tier1b_jax.DeviceTier1b, "sample", "tier1b", lambda o: o[:2]))
@@ -75,6 +84,7 @@ def run(a):
     try:
         for s in a.shards:
             current.clear()
+            saved.clear()
             res = runchain.run([str(root / f"gen_even/gen.001400_{s:08d}.root")], str(Path(a.out).parent / f"pass_{s}"),
                                calib=str(root / "data/geometry/crvcalib_sim_best_v1_5_run1400.csv"),
                                deviation=str(root / "data/geometry/crvphoton_sim_best_v1_5_run1400.csv"),
@@ -84,6 +94,9 @@ def run(a):
             record[str(s)] = {"stages": dict(current), "generated_events": res["generated_events"],
                               "clusters_per_generated": res["clusters_per_generated"]}
             print(json.dumps({"shard": s, **record[str(s)]}), flush=True)
+            if a.save_clusters:
+                Path(a.save_clusters).mkdir(parents=True, exist_ok=True)
+                np.savez(Path(a.save_clusters) / f"clusters_{s}.npz", **saved["clusters"][0])
     finally:
         for p in patches:
             p.stop()
@@ -106,6 +119,27 @@ def compare(a):
     return 0 if not bad else 1
 
 
+def clusters(a):
+    """Cluster lists of two runs (--save-clusters dirs): counts and integer fields exact, float fields max |diff|."""
+    out, worst = {}, {}
+    for f in sorted(Path(a.a).glob("clusters_*.npz")):
+        x, y = np.load(f), np.load(Path(a.b) / f.name)
+        r = {"clusters": [len(x["cl_event"]), len(y["cl_event"])]}
+        if len(x["cl_event"]) == len(y["cl_event"]):
+            for k in x.files:
+                if x[k].dtype.kind in "iub":
+                    r.setdefault("integer_mismatch", {})[k] = int((x[k] != y[k]).sum())
+                else:
+                    d = float(np.nanmax(np.abs(x[k] - y[k]), initial=0))
+                    r.setdefault("max_abs", {})[k] = d
+                    worst[k] = max(worst.get(k, 0), d)
+        out[f.stem] = r
+    same = all(r["clusters"][0] == r["clusters"][1] and not any(r.get("integer_mismatch", {}).values())
+               for r in out.values())
+    print(json.dumps({"files": len(out), "same_lists": same, "max_abs": worst, "per_file": out}, indent=1))
+    return 0 if same else 1
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -118,11 +152,15 @@ def main():
     r.add_argument("--jax", action="store_true")
     r.add_argument("--transport-backend", choices=("numpy", "jax"), default="numpy")
     r.add_argument("--tier1b-backend", choices=("numpy", "jax"), default="numpy")
+    r.add_argument("--save-clusters", help="also write each shard's cluster list (cl_* arrays) to this directory")
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")
+    k = sub.add_parser("clusters")
+    k.add_argument("a")
+    k.add_argument("b")
     a = p.parse_args()
-    sys.exit(run(a) if a.cmd == "run" else compare(a))
+    sys.exit(run(a) if a.cmd == "run" else compare(a) if a.cmd == "compare" else clusters(a))
 
 
 if __name__ == "__main__":

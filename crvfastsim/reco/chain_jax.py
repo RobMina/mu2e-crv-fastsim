@@ -41,8 +41,9 @@ def _pulse_dispatch(W, rows, cfg, batch, L):
     return outs
 
 
-def _pulse_collect(outs, W, rows, cfg_np):
-    """Flat pulses (waveform row, seq, pe, time) in (waveform, seq) order; flagged waveforms redone in numpy."""
+def _pulse_collect(outs, W, rows, cfg_np, counts=None):
+    """Flat pulses (waveform row, seq, pe, time) in (waveform, seq) order; flagged waveforms redone in numpy (opt-in:
+    on the device first). Returns the number redone on the host; counts["device_refit"] gets the device count."""
     if getattr(outs, "compact", False):
         host = CJ._real_rows_to_host(outs, PULSE_KEYS)
         d = {k: np.concatenate([o[k] for o in host]) for k in PULSE_KEYS}
@@ -52,19 +53,31 @@ def _pulse_collect(outs, W, rows, cfg_np):
     redo = d["rounds_exhausted"] | d["window_overflow"] | d["input_truncated"]
     pe, tm = d["pe"][wf, seq], d["time"][wf, seq]
     nredo = int(redo.sum())
+    ndevice = 0
     if nredo:
         rr = np.flatnonzero(redo)
-        g = rows[rr]
-        sub = pulsefit.reconstruct_full(W["adc"][g], W["n"][g], W["start"][g], W["ped"][g].astype(float),
-                                   W["area"][g].astype(float), W["height"][g].astype(float), cfg_np)
         keep = ~redo[wf]
-        wf = np.concatenate([wf[keep], rr[sub["wf"]]])
-        seq = np.concatenate([seq[keep], sub["seq"]])
-        pe = np.concatenate([pe[keep], sub["pe"]])
-        tm = np.concatenate([tm[keep], sub["time"]])
+        wf, seq, pe, tm = wf[keep], seq[keep], pe[keep], tm[keep]
+        if os.environ.get("CRVFASTSIM_DEVICE_REFIT") == "1":   # opt-in: flagged rows refit on the device first
+            from .refit_jax import refit
+            dwf, dseq, dpe, dtm, residual = refit(W, rows[rr], cfg_np)
+            wf, seq = np.concatenate([wf, rr[dwf]]), np.concatenate([seq, dseq])
+            pe, tm = np.concatenate([pe, dpe]), np.concatenate([tm, dtm])
+            ndevice = int((~residual).sum())
+            rr = rr[residual]
+        if len(rr):
+            g = rows[rr]
+            sub = pulsefit.reconstruct_full(W["adc"][g], W["n"][g], W["start"][g], W["ped"][g].astype(float),
+                                       W["area"][g].astype(float), W["height"][g].astype(float), cfg_np)
+            wf = np.concatenate([wf, rr[sub["wf"]]])
+            seq = np.concatenate([seq, sub["seq"]])
+            pe = np.concatenate([pe, sub["pe"]])
+            tm = np.concatenate([tm, sub["time"]])
         o = np.lexsort((seq, wf))
         wf, seq, pe, tm = wf[o], seq[o], pe[o], tm[o]
-    return rows[wf], seq, pe, tm, nredo
+    if counts is not None:
+        counts["device_refit"] = ndevice
+    return rows[wf], seq, pe, tm, nredo - ndevice
 
 
 def run(W, G, status, n_chunks=8, rounds=3, batch=65536, L=12, coinc_cfg=C.FinderConfig(), timers=None,
@@ -100,7 +113,10 @@ def run(W, G, status, n_chunks=8, rounds=3, batch=65536, L=12, coinc_cfg=C.Finde
             add("pulse_dispatch_s", t0)
         if 0 <= k - 1 < len(chunks):
             t0 = tic()
-            wrow, seq, pe, tm, nredo = _pulse_collect(pul.pop(k - 1), W, chunks[k - 1], cfg_np)
+            counts = {}
+            wrow, seq, pe, tm, nredo = _pulse_collect(pul.pop(k - 1), W, chunks[k - 1], cfg_np, counts)
+            if counts.get("device_refit"):
+                timers["pulse_device_refit"] = timers.get("pulse_device_refit", 0) + counts["device_refit"]
             if cfg_np.ignore_channels:
                 keep = (status[W['bar'][wrow] * 4 + W['sipm'][wrow]] & 0b010) == 0
                 wrow, seq, pe, tm = wrow[keep], seq[keep], pe[keep], tm[keep]
