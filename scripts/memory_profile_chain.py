@@ -70,7 +70,8 @@ def wrap(records, function, name):
             _fold()
             _OPEN.pop()
             records.append({"stage": name, "seconds": time.perf_counter() - start, "rss_before": before,
-                            "rss_after": _status("VmRSS"), "peak_during": frame["peak"] if reset else None,
+                            "rss_after": _status("VmRSS"), "anon_after": _status("RssAnon"),
+                            "file_after": _status("RssFile"), "peak_during": frame["peak"] if reset else None,
                             "device_before": dev_before, "device_after": _device()})
     return call
 
@@ -143,7 +144,8 @@ def main():
             continue
         g = lambda k: None if r.get(k) is None else round(r[k] / 2 ** 30, 3)
         dv = r.get("device_after") or {}
-        print(f"{r['stage']:40s} rss {g('rss_before')} -> {g('rss_after')} GiB, peak {g('peak_during')} GiB, "
+        print(f"{r['stage']:40s} rss {g('rss_before')} -> {g('rss_after')} GiB (anon {g('anon_after')}, file "
+              f"{g('file_after')}), peak {g('peak_during')} GiB, "
               f"device {None if not dv.get('bytes_in_use') else round(dv['bytes_in_use'] / 2 ** 30, 3)} GiB "
               f"(peak {None if not dv.get('peak_bytes_in_use') else round(dv['peak_bytes_in_use'] / 2 ** 30, 3)})")
 
