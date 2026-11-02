@@ -4,13 +4,18 @@ A step table has three classes: the primary muon itself (P), the muon's descenda
 primaries (S). An arm takes each class from one source and runs the same fast response and reco on the union:
 
     g  Geant4 steps            f  fast steps (stage C + tier 1b)       -  class left out
-    r  (class D only) tier 1b drawn on the Geant4 primary crossings
+    s  (class P only) Geant4 primary steps with dE/dx exchanged at random between crossings of one tier-1b bin
+    r  (class D only) tier 1b drawn on the arm's primary crossings (P = g or s: Geant4, P = f: fast)
+    k  (class D only) as r, each crossing's donor taken among the 4 library crossings of its draw cell nearest in the
+       muon's kinetic-energy loss to its next crossing (last crossings: among the cell's last crossings); no hard draw
+    t  (class D only, P = g or s) as k, nearest in the descendant energy Geant4 attached to the crossing (diagnostic:
+       uses the Geant4 descendants it replaces)
 
 An arm is three letters P, D, S plus an optional @tag for an independent response seed: ggg, fff, gfg (Geant4 primary,
 fast descendants, Geant4 showers), grg, g--, ggg@2. The pure arms keep the table's row order, so fff equals the
 `fasttables chain` output of the same seed. Rows of one event are joined by (run, subrun, event); a class keeps its
-own absolute positions, so in a hybrid the descendants sit around the muon they were made for (the r source does not
-have that leak; `same_bars` marks the events whose muons cross the same bars in both sources).
+own absolute positions, so in a hybrid the descendants sit around the muon they were made for (the r, k, t sources do
+not have that leak; `same_bars` marks the events whose muons cross the same bars in both sources).
 
     python -m valhist.attrib shard --shard 22 --arms ggg,fff,gfg,fgg --g4 'G/g4all.{s}.root' --fast 'F/fast1b.{s}.root' \
         --calib C.csv --deviation D.csv --tier1b-dir T --out OUT
@@ -38,7 +43,10 @@ KEY = tables.KEY
 CLASSES = ("P", "D", "S")
 P, D, S = 0, 1, 2
 SHOWER_BASE = T.SHOWER_KEY_BASE
-SOURCE_OFFSET = {"g": 0, "f": 1 << 40, "r": 2 << 40}
+SOURCE_OFFSET = {"g": 0, "f": 1 << 40, "r": 2 << 40, "s": 3 << 40, "t": 4 << 40, "k": 5 << 40}
+DRAW_SEED = {("r", "g"): 77, ("r", "f"): 78, ("t", "g"): 79, ("k", "g"): 80, ("k", "f"): 81}
+MATCH_WINDOW = 4          # library crossings nearest in the matched quantity among which a donor is drawn
+LAST_CROSSING = -50.0     # matched value of a muon's last crossing (no next crossing), below any energy loss
 STEP_COLS = ["nstep", "bar", "sp", "t0", "t1", "x0", "y0", "z0", "x1", "y1", "z1", "px0", "py0", "pz0", "p1", "len",
              "edep"]
 PE_EDGES = np.linspace(0.0, 2000.0, 101)
@@ -51,9 +59,16 @@ E_CLASS = np.array([2.0, 5.0, 15.0, 50.0])  # MeV of descendant energy in the cl
 def parse_arm(spec):
     """'gfg@2' -> ('g', 'f', 'g', 2)."""
     letters, _, tag = spec.partition("@")
-    if len(letters) != 3 or letters[0] not in "gf-" or letters[1] not in "gfr-" or letters[2] not in "gf-":
+    if len(letters) != 3 or letters[0] not in "gfs-" or letters[1] not in "gfrkt-" or letters[2] not in "gf-":
         raise ValueError(f"bad arm {spec!r}")
+    if letters[1] in "rkt" and (letters[0] == "-" or (letters[1] == "t" and letters[0] == "f")):
+        raise ValueError(f"bad arm {spec!r}: {letters[1]} needs {'Geant4' if letters[1] == 't' else 'primary'} crossings")
     return letters[0], letters[1], letters[2], int(tag or 0)
+
+
+def draw_key(letters):
+    """Source key of a drawn descendant class: (letter, crossings source), the s primary sharing the Geant4 crossings."""
+    return letters[1], "f" if letters[0] == "f" else "g"
 
 
 def shard_name(k):
@@ -108,14 +123,138 @@ def g4_crossings(g):
     return x.sort_values(KEY + ["t0"], kind="stable").reset_index(drop=True)
 
 
-def redraw(g, fast_parts, gen, lib, geom, options, seed):
-    """Tier-1b descendants drawn for the Geant4 primary crossings: class D rows of a tag_fast table."""
-    x = g4_crossings(g)
+def fast_crossings(f):
+    """Fast primary-muon rows (one per crossing, sp = muon key) in tier-1a form."""
+    x = f.loc[f.cls == P, KEY + STEP_COLS].sort_values(KEY + ["t0"], kind="stable").reset_index(drop=True)
+    x["nstep"] = x.groupby(KEY).bar.transform("size")
+    return x
+
+
+def tkin(p):
+    return np.sqrt(np.asarray(p, float) ** 2 + T.MASS[13] ** 2) - T.MASS[13]
+
+
+def loss_to_next(x):
+    """Muon kinetic-energy loss from each crossing's entry to the entry of its next crossing in time [MeV];
+    LAST_CROSSING for a muon's last crossing."""
+    p = np.sqrt(x.px0.to_numpy() ** 2 + x.py0.to_numpy() ** 2 + x.pz0.to_numpy() ** 2)
+    mu = x.groupby(KEY + ["sp"], sort=False).ngroup().to_numpy()
+    order = np.lexsort((x.t0.to_numpy(), mu))
+    v = np.full(len(x), LAST_CROSSING)
+    has = np.r_[mu[order][1:] == mu[order][:-1], False]
+    a = order[has]
+    v[a] = tkin(p[a]) - tkin(p[order[np.flatnonzero(has) + 1]])
+    return v
+
+
+def library_loss_to_next(lib):
+    """loss_to_next of every library crossing (index xid), from the template sidecar's entry |p| and next crossing."""
+    g = lib["xgeo"]
+    nx = np.asarray(g["nxt"], np.int64)
+    t = tkin(g["p"])
+    return np.where(nx >= 0, t - t[np.maximum(nx, 0)], LAST_CROSSING)
+
+
+def attached_energy(x, d):
+    """Descendant energy attached to each crossing of x by the library-building rule (tier1b._build_one): a
+    descendant step goes to the crossing of its event in the same bar, else to the one whose entry is nearest to it."""
+    if not len(d) or not len(x):
+        return np.zeros(len(x))
+    dd = d[KEY + ["bar", "x0", "y0", "z0", "x1", "y1", "z1", "edep"]].reset_index(drop=True)
+    dd["did"] = np.arange(len(dd))
+    xx = x[KEY + ["bar", "x0", "y0", "z0"]].rename(columns={"bar": "xbar", "x0": "ex", "y0": "ey", "z0": "ez"})
+    xx["xi"] = np.arange(len(x))
+    m = dd.merge(xx, on=KEY)
+    mid = 0.5 * (m[["x0", "y0", "z0"]].to_numpy() + m[["x1", "y1", "z1"]].to_numpy())
+    dist = np.linalg.norm(mid - m[["ex", "ey", "ez"]].to_numpy(), axis=1)
+    m["score"] = np.where(m.bar.to_numpy() == m.xbar.to_numpy(), -1.0, dist)
+    best = m.loc[m.groupby("did").score.idxmin()]
+    return np.bincount(best.xi.to_numpy(), best.edep.to_numpy(), len(x))
+
+
+class _FirstDraw:
+    """Generator whose first random() call returns given numbers; every other call goes to the wrapped generator."""
+
+    def __init__(self, rng, u):
+        self._rng, self._u = rng, u
+
+    def random(self, size=None, *args, **kw):
+        if self._u is not None:
+            u, self._u = self._u, None
+            if np.shape(u) != (np.prod(size, dtype=np.int64),):
+                raise ValueError("matched draw: first random() call is not the donor draw")
+            return u
+        return self._rng.random(size, *args, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._rng, name)
+
+
+def matched_draw(x, lib, geom, options, v_lib, v_x, rng):
+    """Uniform numbers that make tier1b._desc_for_crossings pick, for each crossing of x, a library crossing of its own
+    draw support (the same cell as the unmatched draw) among the MATCH_WINDOW nearest in value (v_lib[xid] vs v_x).
+    Ties are broken at random by a jitter far below any physical difference."""
+    lx, lo, hi = T._support(x, lib, geom, options.get("context", False), T._indexed(lib))
+    sup, sid = np.unique(np.stack([lo, hi], 1), axis=0, return_inverse=True)
+    sid = sid.ravel()
+    size = sup[:, 1] - sup[:, 0]
+    pos = np.repeat(sup[:, 0] - np.r_[0, np.cumsum(size)[:-1]], size) + np.arange(size.sum())
+    seg = np.repeat(np.arange(len(sup)), size)
+    span = 4e6
+    clip = lambda v: np.clip(v, -1e3, 1e6) + 1e3 + 1e-4 * rng.random(len(v))
+    key = seg * span + clip(v_lib[lx.xid.to_numpy()[pos]])
+    order = np.argsort(key, kind="stable")
+    key, pos = key[order], pos[order]
+    start = np.r_[0, np.cumsum(size)[:-1]]
+    q = np.searchsorted(key, sid * span + clip(np.asarray(v_x, float)))
+    j = q - MATCH_WINDOW // 2 + (rng.random(len(q)) * MATCH_WINDOW).astype(np.int64)
+    j = np.clip(j, start[sid], start[sid] + size[sid] - 1)
+    got, want = v_lib[lx.xid.to_numpy()[pos[j]]], np.asarray(v_x, float)
+    hard = want > 10.0
+    print(f"# matched draw: {len(want):,} crossings, median |donor - target| {np.median(np.abs(got - want)):.3f}, "
+          f"above 10: {hard.sum():,} targets, median donor/target {np.median(got[hard] / want[hard]) if hard.any() else 0:.3f},"
+          f" last-crossing mismatches {int(((got == LAST_CROSSING) != (want == LAST_CROSSING)).sum())}", flush=True)
+    return (pos[j] - lo + 0.5) / (hi - lo)
+
+
+def redraw(x, fast_parts, gen, lib, geom, options, seed, match=None, g_desc=None):
+    """Tier-1b descendants drawn for the crossings x: class D rows of a tag_fast table. match None: the default draw
+    (options as given); 'k': donors matched in loss_to_next; 't': matched in the descendant energy of g_desc attached to
+    each crossing. Matched draws turn the hard and follow draws off (the match replaces them)."""
     muons = fast_parts[(fast_parts.isprim == 1) & (fast_parts.key < SHOWER_BASE)]
-    steps, parts, _ = T.sample(x, muons[KEY + ["key", "parent", "pdg", "isprim"]], gen, lib, geom,
-                               np.random.default_rng([seed, 1000, 77]), showers=False, **options)
+    rng = np.random.default_rng(seed)
+    if match is not None:
+        options = dict(options, hard=False, follow=False)
+        mrng = np.random.default_rng([*np.atleast_1d(seed), 5])
+        if match == "k":
+            u = matched_draw(x, lib, geom, options, library_loss_to_next(lib), loss_to_next(x), mrng)
+        else:
+            ld = lib["libdesc"]
+            v_lib = np.bincount(ld.xid.to_numpy(), ld.edep.to_numpy(), len(lib["libxing"]))
+            u = matched_draw(x, lib, geom, options, v_lib, attached_energy(x, g_desc), mrng)
+        rng = _FirstDraw(rng, u)
+    steps, parts, _ = T.sample(x, muons[KEY + ["key", "parent", "pdg", "isprim"]], gen, lib, geom, rng,
+                               showers=False, **options)
     r = tag_fast(steps, parts)
     return r[r.cls == D].reset_index(drop=True)
+
+
+def shuffle_primary(g, lib, geom, rng):
+    """Geant4 table whose primary-muon steps take the dE/dx of another primary step of the same tier-1b bin (group,
+    momentum, path length), at random: the muon's visible energy loses any link to its own descendants."""
+    s = g.copy()
+    i = np.flatnonzero((s.cls.to_numpy() == P) & (s.len.to_numpy() > 0))
+    p = np.sqrt(s.px0.to_numpy()[i] ** 2 + s.py0.to_numpy()[i] ** 2 + s.pz0.to_numpy()[i] ** 2)
+    ln = s.len.to_numpy()[i]
+    cell = T._bin(lib["libbins"], T._group_index(geom, s.bar.to_numpy()[i]), p, ln)
+    a, b = np.lexsort((rng.random(len(i)), cell)), np.lexsort((rng.random(len(i)), cell))
+    dedx = s.edep.to_numpy()[i] / ln
+    new = np.empty(len(i))
+    new[b] = dedx[a]
+    e = s.edep.to_numpy().copy()
+    e[i] = new * ln
+    s["edep"] = e
+    return s
 
 
 def build_arm(spec, sources):
@@ -231,18 +370,41 @@ def run_shard(a):
     print(f"# shard {a.shard}: g4 {len(g):,} steps, fast {len(f):,} steps, {info}", flush=True)
     write_truth(out / "truth" / f"{s}.npz", g, f, gen, chain.event_key)
     sources = {"g": g, "f": f}
+    tier1b = {}
+
+    def library():
+        if not tier1b:
+            from crvfastsim import tier1b_assets as AS
+            spec = AS.resolve(directory=a.tier1b_dir)
+            tier1b.update(spec=spec, lib=AS.load(spec, geom))
+        return tier1b["lib"], tier1b["spec"].options
+
     for arm in a.arms.split(","):
-        path = out / arm / f"{s}.npz"
+        path = Path(a.write_tables) / f"{arm}.{s}.root" if a.write_tables else out / arm / f"{s}.npz"
         if path.exists():
             continue
         t0 = time.monotonic()
         letters = parse_arm(arm)
-        if letters[1] == "r" and "r" not in sources:
-            from crvfastsim import tier1b_assets as AS
-            spec = AS.resolve(directory=a.tier1b_dir)
-            lib = AS.load(spec, geom)
-            sources["r"] = redraw(g, fparts, gen, lib, geom, spec.options, a.shard)
-        steps, parts = build_arm(arm, sources)
+        local = dict(sources)
+        if letters[0] == "s":
+            if "s" not in sources:
+                lib, _ = library()
+                sources["s"] = shuffle_primary(g, lib, geom, np.random.default_rng([a.shard, 1000, 82]))
+            local["s"] = sources["s"]
+        if letters[1] in "rkt":
+            dk = draw_key(letters)
+            if dk not in sources:
+                lib, options = library()
+                x = g4_crossings(g) if dk[1] == "g" else fast_crossings(f)
+                match = None if dk[0] == "r" else dk[0]
+                sources[dk] = redraw(x, fparts, gen, lib, geom, options, [a.shard, 1000, DRAW_SEED[dk]], match,
+                                     g[g.cls == D] if match == "t" else None)
+            local[letters[1]] = sources[dk]
+        steps, parts = build_arm(arm, local)
+        if a.write_tables:
+            write_table(path, steps, parts)
+            print(f"# {arm}: wrote {path} ({len(steps):,} steps), {time.monotonic() - t0:.0f} s", flush=True)
+            continue
         rng = np.random.default_rng(a.shard if not letters[3] else [a.shard, letters[3]])
         D_ = F.fast_digis(steps[KEY + STEP_COLS], parts, geom, cond, cfg, rng, None, tabs, pmap)
         pulses, cl = F.fast_reco(D_, cond, geom, ccfg, fcfg=cfg.finder)
@@ -256,6 +418,25 @@ def run_shard(a):
         tmp.rename(path)
         print(f"# {arm}: {len(steps):,} steps, {len(ct['pe']):,} clusters, {time.monotonic() - t0:.0f} s", flush=True)
     print(f"# shard {a.shard} done in {time.monotonic() - tick:.0f} s", flush=True)
+
+
+def write_table(path, steps, parts):
+    """An arm's steps in the CrvStepTableDumper layout for the stock response (art CrvStepsFromTable): one particle per
+    step owner, primary muons marked primary; parents are not kept (the response does not use them)."""
+    st = steps[KEY + STEP_COLS].copy()
+    for c in KEY:
+        st[c] = st[c].astype(np.uint32)
+    for c in ("nstep", "bar", "sp"):
+        st[c] = st[c].astype(np.int64)
+    prim = steps.loc[steps.cls == P, KEY + ["sp"]].drop_duplicates().assign(isprim=1)
+    q = parts.rename(columns={"key": "sp"}).merge(prim, on=KEY + ["sp"], how="left").rename(columns={"sp": "key"})
+    q = pd.DataFrame({**{c: q[c].astype(np.uint32) for c in KEY}, "key": q.key.astype(np.int64),
+                      "parent": np.full(len(q), -1, np.int64), "pdg": q.pdg.astype(np.int32),
+                      "isprim": q.isprim.fillna(0).astype(np.int64)})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tables.write(str(tmp), st, q, as_ttree=True)
+    tmp.rename(path)
 
 
 def histogram(pe):
@@ -458,6 +639,58 @@ def attribution(h, weight, n, verbose):
     return frac, removed
 
 
+PATHS = ("fff,grg,ggf,ggg", "fff,frf,grg,ggf,ggg", "fff,grg,gkg,ggf,ggg", "fff,grg,gtg,ggf,ggg", "fff,fkf,gkg,ggf,ggg",
+         "ggf,sgf")
+
+
+def path_shares(h, weight, n, path):
+    """Steps of a path of arms a0 -> a1 -> ... -> ggg: each step's share of fff - ggg (noise-subtracted projection,
+    the shares of a path from fff to ggg add to 1), its paired chi2/ndf, overflow and band changes."""
+    total = h["fff"] - h["ggg"]
+    den = lambda k: paired_terms(total[k], total[k], weight)
+    out = []
+    print(f"\npath {' -> '.join(path)}: share of fff - ggg, paired chi2/ndf of the step, d(overflow), d(bands)")
+    for a_, b_ in zip(path[:-1], path[1:]):
+        d = h[a_] - h[b_]
+        f, ef = jackknife(lambda k: paired_terms(d[k], total[k], weight) / den(k), n)
+        pv, _, nm, ns, pp = flip_null(d[:, :-1])
+        bands = np.c_[np.add.reduceat(d[:, :-1], np.searchsorted(PE_EDGES[:-1], BANDS[:-2]), axis=1), d[:, -1]]
+        db, eb = bands.sum(0), np.sqrt(n * bands.var(0, ddof=1))
+        out.append({"from": a_, "to": b_, "share": f, "e_share": ef, "paired": pv, "null_sd": ns, "p": pp,
+                    "d_bands": db.tolist(), "e_bands": eb.tolist()})
+        print(f"  {a_} -> {b_}: share {f:6.3f} +- {ef:5.3f}  paired {pv:6.3f} (null {nm:.2f} +- {ns:.2f}, p {pp:.1e})  "
+              + " ".join(f"{bn}:{x:+.0f}+-{e:.0f}" for bn, x, e in zip(BAND_NAMES, db, eb)))
+    return out
+
+
+def population_by(C, mu, shards, col, edges, names, arms=("fff", "grg", "gkg", "gtg", "fkf")):
+    """Clusters per (PE band, owner-muon kinematic class) of each arm minus ggg, each arm classed by its own owner
+    (no selection on a partner): do the tail deficit and the bulk excess sit in the same muons?"""
+    ml = mu.rename(columns={"mukey": "owner"})[["shard", "ev", "owner", col]]
+    def table(t):
+        v = t.merge(ml, on=["shard", "ev", "owner"], how="left")[col].to_numpy()
+        j = np.where(np.isfinite(v), np.digitize(v, edges), len(edges) + 1)
+        c = np.zeros((len(shards), len(BAND_NAMES), len(edges) + 2), np.int64)
+        np.add.at(c, (np.searchsorted(shards, t.shard.to_numpy()), band(t.pe.to_numpy()), j), 1)
+        return c
+    ref = table(C["ggg"])
+    labels = list(names) + ["no muon"]
+    r = {"labels": labels, "ggg": ref.sum(0).tolist()}
+    n = len(shards)
+    for x in arms:
+        if x not in C:
+            continue
+        d = table(C[x]) - ref
+        e = np.sqrt(n * d.var(0, ddof=1))
+        print(f"\n{x} - ggg clusters by PE band (rows) and owner {col} (columns)\n" + " " * 12
+              + "".join(f"{l:>16s}" for l in labels))
+        for i, b in enumerate(BAND_NAMES):
+            print(f"{b:12s}" + "".join(f"{ref[:, i, j].sum():7d}{d[:, i, j].sum():+5d}+-{e[i, j]:3.0f}"
+                                       for j in range(len(labels))))
+        r[x] = {"d": d.sum(0).tolist(), "e": e.tolist()}
+    return r
+
+
 def selections(C, out, shards):
     """Named cluster subsets for the attribution: sector groups and events whose muons cross the same bars."""
     _, same = load_truth(out, shards)
@@ -579,9 +812,15 @@ def run_report(a):
             chi, ndf = deck_chi2(hs["ggg"].sum(0), hs["fff"].sum(0))
             print(f"\n--- {name}: fff vs ggg chi2/ndf {chi:.3f} ({ndf}), clusters {hs['ggg'].sum()}")
             R.setdefault("subsets", {})[name] = {"chi2ndf": chi, "ndf": ndf, "fractions": attribution(hs, ws, n, False)[0]}
+    R["paths"] = [path_shares(h, weight, n, p.split(",")) for p in PATHS if all(x in h for x in p.split(","))]
     R["bands"] = band_table(C, shards)
     R["qq"] = quantile_shift(C, shards)
     R["population"] = population(C, shards)
+    mu, same = load_truth(out, shards)
+    R["population_cos"] = population_by(C, mu, shards, "cosy", [0.3, 0.6, 0.8, 0.9, 0.97],
+                                        ["<0.3", "0.3-0.6", "0.6-0.8", "0.8-0.9", "0.9-0.97", ">0.97"])
+    R["population_p"] = population_by(C, mu, shards, "p", [500, 1000, 2000, 5000, 20000],
+                                      ["<0.5", "0.5-1", "1-2", "2-5", "5-20", ">20 GeV/c"])
     R["multiplicity"] = multiplicity(out, C, shards)
     if a.refs:
         Z = np.load(a.refs)
@@ -607,16 +846,48 @@ def run_report(a):
                                               f"overflow {v['ov_ref']} vs {v['ov_arm']} ratio {v['ov_ratio']:.3f} +- {v['e_ov_ratio']:.3f} "
                                               f"paired {v['paired']:.3f} (null {v['null_mean']:.2f} +- {v['null_sd']:.2f}, p {v['p']:.1e})"
                                               for x, v in rows.items()))
+        stock = {nm[3:]: Z[nm][idx] for nm in Z.files if nm.startswith("st_")}
+        if "ggg" in stock:
+            R["stock"] = stock_table(stock, h, n)
         if "a0g" in Z.files and "a1" in Z.files:
             chi, ndf = deck_chi2(Z["a0g"][idx].sum(0), Z["a1"][idx].sum(0))
             R["refs"]["a1_vs_a0g"] = {"chi2ndf": chi, "ndf": ndf}
             pv, _, nm, ns, pp = flip_null((Z["a1"][idx] - Z["a0g"][idx])[:, :-1])
             R["refs"]["a1_vs_a0g"].update(paired=pv, null_mean=nm, null_sd=ns, p=pp)
             print(f"stock A1 vs A0g on these shards: chi2/ndf {chi:.3f} ({ndf}), paired {pv:.3f} (null {nm:.2f} +- {ns:.2f})")
-    mu, same = load_truth(out, shards)
     R["paired"] = paired_report(C, mu, same, h)
     if a.json:
         json.dump(R, open(a.json, "w"), indent=1)
+
+
+def stock_table(stock, h, n):
+    """Arms through the stock response (art CrvStepsFromTable on the arm's table): each against stock ggg, with the
+    fast-response value beside it, and each stock arm against the same arm through the fast response."""
+    ref = stock["ggg"]
+    weight = 1.0 / np.maximum(ref.sum(0) + stock.get("fff", ref).sum(0), 1.0)
+    weight[-1] = 0.0
+    R = {}
+    print(f"\nstock response, {n} shards: arm vs stock ggg (excess/ndf, paired, overflow ratio), then stock vs fast "
+          f"response of the same arm")
+    for x, v in stock.items():
+        chi, ndf = deck_chi2(ref.sum(0), v.sum(0))
+        d = v - ref
+        ex, eex = (0.0, 0.0) if x == "ggg" else jackknife(lambda k: signal(d[k], weight) / ndf, n)
+        pv, _, nm, ns, pp = flip_null(d[:, :-1])
+        dov = d[:, -1]
+        r = {"excess_ndf": ex, "excess_err": eex, "paired": pv, "null_sd": ns, "p": pp, "clusters": int(v.sum()),
+             "ov_ratio": float(v[:, -1].sum() / ref[:, -1].sum()), "e_ov_ratio": float(np.sqrt(n * dov.var(ddof=1))
+                                                                                      / ref[:, -1].sum())}
+        if x in h:
+            pf, _, _, nsf, ppf = flip_null((v - h[x])[:, :-1])
+            r.update(vs_fast=pf, vs_fast_null_sd=nsf, vs_fast_p=ppf,
+                     fast_ov_ratio=float(h[x][:, -1].sum() / v[:, -1].sum()))
+        R[x] = r
+        print(f"  st_{x:6s} excess {ex:6.3f} +- {eex:5.3f}  paired {pv:6.3f} (null sd {ns:.2f}, p {pp:.1e})  overflow "
+              f"{r['ov_ratio']:.3f} +- {r['e_ov_ratio']:.3f}  clusters {r['clusters']}"
+              + (f"  | vs fast {x}: paired {r['vs_fast']:.3f} (p {r['vs_fast_p']:.1e}), fast/stock overflow "
+                 f"{r['fast_ov_ratio']:.3f}" if x in h else ""))
+    return R
 
 
 def attach(m, mu, same):
@@ -630,7 +901,9 @@ def paired_report(C, mu, same, h):
     for label, a_, b_ in (("fff vs ggg", "ggg", "fff"), ("g fast D vs ggg", "ggg", "gfg"), ("fast P vs ggg", "ggg", "fgg"),
                           ("primary only f vs g", "g--", "f--"), ("redraw vs ggg", "ggg", "grg"),
                           ("redraw vs fast D", "gfg", "grg"), ("descendants added, g", "g--", "ggg"),
-                          ("descendants added, f", "f--", "fff")):
+                          ("descendants added, f", "f--", "fff"), ("loss-matched vs ggg", "ggg", "gkg"),
+                          ("energy-matched vs ggg", "ggg", "gtg"), ("muon dE/dx shuffled vs ggf", "ggf", "sgf"),
+                          ("fast loss-matched vs ggg", "ggg", "fkf")):
         if a_ not in C or b_ not in C:
             continue
         m = match(C[a_].copy(), C[b_].copy())
@@ -651,7 +924,8 @@ def paired_report(C, mu, same, h):
         d = {"units": tot, "matched": len(both)}
         for by, nm in (("sectname", "sector"), ("lay", "layers (arm a)"), ("pgroup", "muon p [MeV/c]"),
                        ("cosgroup", "cos(vertical)"), ("multi", "multi-muon event"), ("same", "same bars in both"),
-                       ("own", "owner sign (1 muon, 0 shower)"), ("peband", "mean PE band")):
+                       ("own", "owner sign (1 muon, 0 shower)"), ("peband", "mean PE band"),
+                       ("share", "descendant share of arm a (<2, 5, 10, 20, 40, >40 %)")):
             d[nm] = split_table(both, by, f"{label}: dPE by {nm}")
         R[label] = d
         bi, bj = band(both.pe_a.to_numpy()), band(both.pe_b.to_numpy())
@@ -675,6 +949,8 @@ def main():
     r.add_argument("--counters")
     r.add_argument("--tier1b-dir")
     r.add_argument("--out", required=True)
+    r.add_argument("--write-tables", help="write each arm's step table to DIR/<arm>.<shard>.root instead of running "
+                   "the fast response (stock response input)")
     r.set_defaults(fn=run_shard)
     x = sub.add_parser("refs")
     x.add_argument("--ref", action="append", required=True, metavar="NAME=PATTERN")
