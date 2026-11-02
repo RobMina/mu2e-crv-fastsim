@@ -121,11 +121,11 @@ def build_arm(spec, sources):
     letters = parse_arm(spec)[:3]
     used = {c for c in letters if c != "-"}
     frames = []
-    for cls, c in enumerate(letters):
+    pure = len(used) == 1 and "-" not in letters
+    for cls, c in enumerate(letters[:1] if pure else letters):
         if c == "-":
             continue
-        t = sources[c]
-        t = t[t.cls == cls] if len(used) > 1 or "-" in letters else t
+        t = sources[c] if pure else sources[c][sources[c].cls == cls]
         off = SOURCE_OFFSET[c] if len(used) > 1 else 0
         frames.append(t.assign(sp=t.sp.to_numpy() + off) if off else t)
     if len(frames) == 1:
