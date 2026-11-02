@@ -73,3 +73,11 @@ def test_signal_subtracts_noise():
 def test_histogram_overflow_last():
     h = A.histogram([1.0, 25.0, 1999.0, 2000.0, 5000.0])
     assert h[0] == 1 and h[1] == 1 and h[99] == 1 and h[-1] == 2 and h.sum() == 5
+
+
+def test_flip_null_centres_on_one_and_sees_a_shift():
+    rng = np.random.default_rng(3)
+    d = rng.normal(0, 3, (50, 30))
+    obs, ndf, mean, sd, p = A.flip_null(d, nflip=4000)
+    assert ndf == 30 and abs(mean - 1.0) < 0.05 and p > 1e-3
+    assert A.flip_null(d + 3.0, nflip=4000)[4] < 1e-2
