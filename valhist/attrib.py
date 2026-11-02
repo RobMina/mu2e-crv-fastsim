@@ -43,7 +43,9 @@ STEP_COLS = ["nstep", "bar", "sp", "t0", "t1", "x0", "y0", "z0", "x1", "y1", "z1
              "edep"]
 PE_EDGES = np.linspace(0.0, 2000.0, 101)
 GATE_NS = (-200.0, 100.0)  # step t0 relative to the cluster's [start, end]; retuned in shard tests, see report
-SECTORS = np.array(["T1", "T2", "EX"], dtype=object)
+SECTOR_GROUP = np.array([0, 1, 2] + [3] * 8)
+GROUP_NAMES = ("EX", "T1", "T2", "M")
+E_CLASS = np.array([2.0, 5.0, 15.0, 50.0])  # MeV of descendant energy in the cluster's bars
 
 
 def parse_arm(spec):
@@ -142,7 +144,7 @@ def cluster_table(pulses, cl, geom, steps, event_key):
     """One row per cluster: reco quantities + per-class visible energy of the steps in its bars, in time with it."""
     n = len(cl["ev"])
     columns = ("ev", "idx", "sectortype", "start", "end", "pe", "nlayers", "nbars", "sector", "owner", "owner_cls",
-               "e_p", "e_d", "e_s", "l_p", "avgtime", "x", "y", "z")
+               "e_p", "e_d", "e_s", "l_p", "avgtime", "x", "y", "z", "npulses")
     if n == 0:
         return {k: np.zeros(0) for k in columns}
     ev = np.asarray(cl["ev"], np.int64)
@@ -180,7 +182,7 @@ def cluster_table(pulses, cl, geom, steps, event_key):
             "nlayers": ak.to_numpy(ak.num(ak.Array(cl["layers"]))).astype(np.int64), "nbars": nbars, "sector": sector,
             "owner": owner, "owner_cls": domcls, "e_p": e[0], "e_d": e[1], "e_s": e[2], "l_p": l_p,
             "avgtime": np.asarray(cl["avgtime"], float), "x": np.asarray(cl["x"], float),
-            "y": np.asarray(cl["y"], float), "z": np.asarray(cl["z"], float)}
+            "y": np.asarray(cl["y"], float), "z": np.asarray(cl["z"], float), "npulses": count}
 
 
 def same_bar_events(g, f):
@@ -247,7 +249,10 @@ def run_shard(a):
         ct = cluster_table(pulses, cl, geom, steps, chain.event_key)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp.npz")
-        np.savez_compressed(tmp, **ct, nsteps=len(steps), ndigi=len(D_["ev"]), npulse=len(pulses["ev"]))
+        evk, nst = np.unique(chain.event_key(steps), return_counts=True)
+        evd, ndg = np.unique(D_["ev"], return_counts=True)
+        np.savez_compressed(tmp, **ct, nsteps=len(steps), ndigi=len(D_["ev"]), npulse=len(pulses["ev"]),
+                            mult_ev=evk, mult_nstep=nst, mult_ndigi=ndg, mult_digi_ev=evd)
         tmp.rename(path)
         print(f"# {arm}: {len(steps):,} steps, {len(ct['pe']):,} clusters, {time.monotonic() - t0:.0f} s", flush=True)
     print(f"# shard {a.shard} done in {time.monotonic() - tick:.0f} s", flush=True)
@@ -297,6 +302,27 @@ def signal(d, weight):
     return paired_terms(d, d, weight)
 
 
+def flip_null(d, nflip=20000, seed=20261101):
+    """Paired chi2/ndf of per-shard differences d [shards, bins] with the bias factor, and its sign-flip null.
+
+    var_b = N/(N-1) sum_s (d_sb - mean d_b)^2, D_b = sum_s d_sb; the sign flips keep the correlations between bins.
+    Returns value, ndf, null mean, null sd, p (flips at or above the value; 1/(nflip+1) at best)."""
+    n = len(d)
+    use = (d != 0).any(0)
+    if not use.any():
+        return 0.0, 0, 1.0, 0.0, 1.0
+    d = np.asarray(d, float)[:, use]
+    ss = (d * d).sum(0)
+    def value(total):
+        var = n / (n - 1.0) * (ss - total * total / n)
+        t2 = np.where(var > 0, total * total / np.where(var > 0, var, 1.0), 0.0)
+        return t2.mean(-1) * (n - 3.0) / (n - 1.0)
+    rng = np.random.default_rng(seed)
+    obs = float(value(d.sum(0)))
+    null = np.concatenate([value(rng.choice((-1.0, 1.0), (1000, n)) @ d) for _ in range(nflip // 1000)])
+    return obs, int(use.sum()), float(null.mean()), float(null.std()), float(((null >= obs).sum() + 1) / (len(null) + 1))
+
+
 def decompose(h):
     """Yates effects of the 2^3 design from {arm: [shards, bins]}; they sum exactly to fff - ggg."""
     g = h["ggg"]
@@ -328,7 +354,7 @@ def load_clusters(out, arm, shards):
     for k in shards:
         p = Path(out) / arm / f"{shard_name(k)}.npz"
         with np.load(p) as z:
-            d = {c: z[c] for c in z.files if z[c].ndim == 1}
+            d = {c: z[c] for c in z.files if z[c].ndim == 1 and not c.startswith("mult_")}
         d = pd.DataFrame(d)
         d["shard"] = k
         frames.append(d)
@@ -375,6 +401,144 @@ def band(pe):
     return np.digitize(pe, BANDS) - 1
 
 
+def multiplicity(out, C, shards):
+    """Per arm, mean and tail of the event and cluster multiplicities that survive X1: difference to ggg, paired."""
+    def per_shard(x):
+        rows = []
+        for k in shards:
+            with np.load(Path(out) / x / f"{shard_name(k)}.npz") as z:
+                ns, nd = z["mult_nstep"], z["mult_ndigi"]
+                np_ = C[x].npulses[C[x].shard == k].to_numpy()
+                rows.append([ns.sum(), (ns >= 20).sum(), (ns >= 50).sum(), nd.sum(), (nd >= 50).sum(), (nd >= 100).sum(),
+                             np_.sum(), len(np_)])
+        return np.array(rows, float)
+    labels = ["steps", "ev steps>=20", "ev steps>=50", "digis", "ev digis>=50", "ev digis>=100", "pulses in clusters",
+              "clusters"]
+    ref = per_shard("ggg")
+    n = len(shards)
+    print("\nmultiplicities: total per arm, relative difference to ggg in percent with the paired error\n" + " " * 8
+          + "".join(f"{x:>22s}" for x in labels))
+    r = {}
+    for x in C:
+        c = per_shard(x)
+        d = c - ref
+        rel, e = d.sum(0) / ref.sum(0), np.sqrt(n * d.var(0, ddof=1)) / ref.sum(0)
+        print(f"{x:8s}" + "".join(f"{t:11.0f} {100 * a_:+5.2f}+-{100 * b_:.2f}" for t, a_, b_ in zip(c.sum(0), rel, e)))
+        r[x] = {l: {"n": float(t), "rel": float(a_), "e": float(b_)} for l, t, a_, b_ in zip(labels, c.sum(0), rel, e)}
+    return r
+
+
+FACTORIAL = ("ggg", "fff", "fgg", "gfg", "ggf", "ffg", "fgf", "gff")
+
+
+def attribution(h, weight, n, verbose):
+    """Share of the residual fff - ggg carried by each effect (noise-subtracted projection), and the chi2 excess that
+    each hybrid arm removes, with shard jackknife errors."""
+    eff, total = decompose(h)
+    den = lambda k: paired_terms(total[k], total[k], weight)
+    frac, removed = {}, {}
+    if verbose:
+        print("\nresidual share by effect (noise-subtracted projection on fff - ggg), then its overflow change")
+    for name, d_ in eff.items():
+        f, ef = jackknife(lambda k: paired_terms(d_[k], total[k], weight) / den(k), n)
+        ov, eov = float(d_[:, -1].sum()), float(np.sqrt(n * d_[:, -1].var(ddof=1)))
+        pv, pn, nm, ns, pp = flip_null(d_[:, :-1])
+        frac[name] = {"f": f, "ef": ef, "overflow": ov, "e_overflow": eov, "paired": pv, "null_mean": nm, "null_sd": ns,
+                      "p": pp}
+        print(f"{name:5s} {f:7.3f} +- {ef:5.3f}   d(overflow) {ov:7.0f} +- {eov:4.0f}   paired chi2/ndf {pv:6.3f} "
+              f"(null {nm:.2f} +- {ns:.2f}, p {pp:.1e})")
+    print(f"total d(overflow) {total[:, -1].sum():.0f} +- {np.sqrt(n * total[:, -1].var(ddof=1)):.0f}")
+    ref = h["ggg"]
+    for label, arm in (("G4 primary", "gff"), ("G4 descendants", "fgf"), ("G4 showers", "ffg"),
+                       ("G4 P+D", "ggf"), ("G4 P+S", "gfg"), ("G4 D+S", "fgg")):
+        f, ef = jackknife(lambda k: 1 - signal((h[arm] - ref)[k], weight) / signal(total[k], weight), n)
+        removed[label] = {"arm": arm, "removed": f, "e": ef}
+        if verbose:
+            print(f"chi2 excess removed by {label:15s} ({arm}): {f:6.3f} +- {ef:5.3f}")
+    return frac, removed
+
+
+def selections(C, out, shards):
+    """Named cluster subsets for the attribution: sector groups and events whose muons cross the same bars."""
+    _, same = load_truth(out, shards)
+    same = same.set_index(["shard", "ev"]).same
+    def in_same(t):
+        ix = pd.MultiIndex.from_arrays([t.shard.to_numpy(), t.ev.to_numpy()])
+        return pd.Series(same.reindex(ix).fillna(True).to_numpy(dtype=bool), index=t.index)
+    out_ = [(f"sector {name}", (lambda i: (lambda t: SECTOR_GROUP[t.sector.to_numpy()] == i))(i))
+            for i, name in enumerate(GROUP_NAMES)]
+    return out_ + [("events with the same primary bars in G4 and fast", in_same)]
+
+
+def band_table(C, shards):
+    """Clusters per PE band and arm; difference to ggg with the paired shard error."""
+    def counts(t):
+        return np.stack([np.bincount(band(t.pe[t.shard == k].to_numpy()), minlength=len(BAND_NAMES)) for k in shards])
+    n = len(shards)
+    ref = counts(C["ggg"])
+    r = {}
+    print(f"\nband counts, difference to ggg (paired shard error)\n{'arm':8s}" + "".join(f"{b:>17s}" for b in BAND_NAMES))
+    for x, t in C.items():
+        c = counts(t)
+        d = c - ref
+        cell = [f"{c[:, i].sum():7d} {d[:, i].sum():+5d}+-{np.sqrt(n * d[:, i].var(ddof=1)):3.0f}" for i in range(c.shape[1])]
+        print(f"{x:8s}" + "".join(f"{v:>17s}" for v in cell))
+        r[x] = {"n": c.sum(0).tolist(), "d": d.sum(0).tolist(), "e": np.sqrt(n * d.var(0, ddof=1)).tolist()}
+    return r
+
+
+def quantile_shift(C, shards):
+    """PE quantiles of pairs of arms: the shift q(b) - q(a) with its shard jackknife error."""
+    qs = np.array([0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995])
+    out = {}
+    for a_, b_ in (("ggg", "fff"), ("ggg", "gfg"), ("ggg", "fgg"), ("ggg", "grg"), ("g--", "f--")):
+        if a_ not in C or b_ not in C:
+            continue
+        pa, pb = C[a_].pe.to_numpy(), C[b_].pe.to_numpy()
+        sa, sb = C[a_].shard.to_numpy(), C[b_].shard.to_numpy()
+        v0 = np.quantile(pb, qs) - np.quantile(pa, qs)
+        jk = np.stack([np.quantile(pb[sb != k], qs) - np.quantile(pa[sa != k], qs) for k in shards])
+        n = len(shards)
+        e = np.sqrt((n - 1) / n * ((jk - jk.mean(0)) ** 2).sum(0))
+        print(f"\nquantile shift {b_} - {a_}: " + "  ".join(f"{q:.3g}:{d:+.1f}+-{x:.1f}" for q, d, x in zip(qs, v0, e)))
+        print("  quantiles of " + a_ + ": " + " ".join(f"{v:.0f}" for v in np.quantile(pa, qs)))
+        out[f"{b_}-{a_}"] = {"q": qs.tolist(), "shift": v0.tolist(), "e": e.tolist(), "ref": np.quantile(pa, qs).tolist()}
+    return out
+
+
+def population(C, shards):
+    """Clusters per (PE band, descendant energy class) for ggg and fff, each tagged by its own steps (no selection on
+    the partner, so no regression to the mean), and the means of the class energies per band."""
+    def table(t):
+        i, j = band(t.pe.to_numpy()), np.digitize(t.e_d.to_numpy(), E_CLASS)
+        c = np.zeros((len(shards), len(BAND_NAMES), len(E_CLASS) + 1), np.int64)
+        np.add.at(c, (np.searchsorted(shards, t.shard.to_numpy()), i, j), 1)
+        return c
+    a_, b_ = table(C["ggg"]), table(C["fff"])
+    d = b_ - a_
+    n = len(shards)
+    e = np.sqrt(n * d.var(0, ddof=1))
+    print("\nfff - ggg clusters by PE band (rows) and descendant energy in the cluster's bars (columns, MeV), own tags")
+    labels = ["<2", "2-5", "5-15", "15-50", ">50"]
+    print(" " * 12 + "".join(f"{x:>16s}" for x in labels))
+    for i, b in enumerate(BAND_NAMES):
+        print(f"{b:12s}" + "".join(f"{a_[:, i, j].sum():7d}{d[:, i, j].sum():+5d}+-{e[i, j]:3.0f}" for j in range(5)))
+    r = {"labels": labels, "ggg": a_.sum(0).tolist(), "d": d.sum(0).tolist(), "e": e.tolist()}
+    for x in ("ggg", "fff", "grg", "gfg", "fgg"):
+        if x not in C:
+            continue
+        t = C[x]
+        g = t.groupby(band(t.pe.to_numpy()))
+        m = pd.DataFrame({"n": g.size(), "pe": g.pe.mean(), "e_p": g.e_p.mean(), "e_d": g.e_d.mean(), "e_s": g.e_s.mean(),
+                          "l_p": g.l_p.mean()})
+        m.index = [BAND_NAMES[i] for i in m.index]
+        print(f"\nmeans per band, {x}\n{m.round(3).to_string()}")
+        r["means_" + x] = m.to_dict("index")
+        print(f"{x}: all clusters mean e_p {t.e_p.mean():.3f} e_d {t.e_d.mean():.3f} e_s {t.e_s.mean():.3f} "
+              f"l_p {t.l_p.mean():.2f} mean(pe | pe<2000) {t.pe[t.pe < 2000].mean():.2f}")
+    return r
+
+
 def run_report(a):
     shards = shard_list(a.shards)
     out = Path(a.out)
@@ -390,34 +554,35 @@ def run_report(a):
     weight = 1.0 / np.maximum(ref.sum(0) + h["fff"].sum(0), 1.0)
     weight[-1] = 0.0            # the deck's statistic has no overflow; the overflow is listed by itself
     sig0 = lambda keep: signal((h["fff"] - ref)[keep], weight)
-    print(f"\n{'arm':10s}{'chi2/ndf':>9s}{'ndf':>5s}{'excess/ndf':>12s}{'+-':>7s}{'clusters':>10s}{'overflow':>9s}"
-          f"{'d(ov) vs ggg':>14s}{'+-':>7s}")
+    print(f"\n{'arm':10s}{'chi2/ndf':>9s}{'ndf':>5s}{'paired':>8s}{'null':>12s}{'p':>9s}{'excess/ndf':>11s}{'+-':>7s}"
+          f"{'clusters':>9s}{'overflow':>9s}{'ov/ggg':>8s}{'+-':>7s}{'d(ov)':>7s}{'+-':>5s}")
     for x in arms:
         chi, ndf = deck_chi2(ref.sum(0), h[x].sum(0))
         d = h[x] - ref
         ex, eex = (0.0, 0.0) if x == "ggg" else jackknife(lambda k: signal(d[k], weight) / ndf, n)
+        pv, pn, nm, ns, pp = flip_null(d[:, :-1])
         dov, edov = float(d[:, -1].sum()), float(np.sqrt(n * d[:, -1].var(ddof=1)))
-        R["arms"][x] = {"chi2ndf": chi, "ndf": ndf, "excess_ndf": ex, "excess_err": eex, "clusters": int(h[x].sum()),
+        ov0 = float(ref[:, -1].sum())
+        R["arms"][x] = {"chi2ndf": chi, "ndf": ndf, "paired": pv, "paired_ndf": pn, "null_mean": nm, "null_sd": ns, "p": pp,
+                        "excess_ndf": ex, "excess_err": eex, "clusters": int(h[x].sum()),
                         "overflow": int(h[x][:, -1].sum()), "d_overflow": dov, "e_d_overflow": edov,
+                        "ov_ratio": 1 + dov / ov0, "e_ov_ratio": edov / ov0,
                         "mean_pe": float(C[x].pe[C[x].pe < 2000].mean())}
-        print(f"{x:10s}{chi:9.3f}{ndf:5d}{ex:12.3f}{eex:7.3f}{h[x].sum():10d}{h[x][:, -1].sum():9d}{dov:14.0f}{edov:7.0f}")
-    if all(k in h for k in ("fgg", "gfg", "ggf", "ffg", "fgf", "gff", "fff")):
-        eff, total = decompose(h)
-        den = lambda k: paired_terms(total[k], total[k], weight)
-        R["fractions"] = {}
-        print(f"\nresidual fraction by effect (noise-subtracted projection on fff - ggg): overflow share in the last column")
-        for name, d_ in eff.items():
-            f, ef = jackknife(lambda k: paired_terms(d_[k], total[k], weight) / den(k), n)
-            ov = float(d_[:, -1].sum())
-            eov = float(np.sqrt(n * d_[:, -1].var(ddof=1)))
-            R["fractions"][name] = {"f": f, "ef": ef, "overflow": ov, "e_overflow": eov}
-            print(f"{name:5s} {f:7.3f} +- {ef:5.3f}   d(overflow) {ov:7.0f} +- {eov:4.0f}")
-        R["removed"] = {}
-        for label, arm in (("all G4 primary", "gff"), ("all G4 descendants", "fgf"), ("all G4 showers", "ffg"),
-                           ("P+D G4", "ggf"), ("P+S G4", "gfg"), ("D+S G4", "fgg")):
-            f, ef = jackknife(lambda k: 1 - signal((h[arm] - ref)[k], weight) / signal(total[k], weight), n)
-            R["removed"][label] = {"removed": f, "e": ef}
-            print(f"chi2 excess removed by {label:20s} ({arm}): {f:6.3f} +- {ef:5.3f}")
+        print(f"{x:10s}{chi:9.3f}{ndf:5d}{pv:8.3f}{nm:6.2f}+-{ns:4.2f}{pp:9.1e}{ex:11.3f}{eex:7.3f}{h[x].sum():9d}"
+              f"{h[x][:, -1].sum():9d}{1 + dov / ov0:8.3f}{edov / ov0:7.3f}{dov:7.0f}{edov:5.0f}")
+    if all(k in h for k in FACTORIAL):
+        R["fractions"], R["removed"] = attribution(h, weight, n, True)
+        for name, mask in selections(C, out, shards):
+            hs = {x: np.stack([histogram(C[x].pe[(C[x].shard == k) & mask(C[x])]) for k in shards]) for x in FACTORIAL}
+            ws = 1.0 / np.maximum(hs["ggg"].sum(0) + hs["fff"].sum(0), 1.0)
+            ws[-1] = 0.0
+            chi, ndf = deck_chi2(hs["ggg"].sum(0), hs["fff"].sum(0))
+            print(f"\n--- {name}: fff vs ggg chi2/ndf {chi:.3f} ({ndf}), clusters {hs['ggg'].sum()}")
+            R.setdefault("subsets", {})[name] = {"chi2ndf": chi, "ndf": ndf, "fractions": attribution(hs, ws, n, False)[0]}
+    R["bands"] = band_table(C, shards)
+    R["qq"] = quantile_shift(C, shards)
+    R["population"] = population(C, shards)
+    R["multiplicity"] = multiplicity(out, C, shards)
     if a.refs:
         Z = np.load(a.refs)
         idx = [list(Z["shards"]).index(k) for k in shards]
@@ -431,18 +596,25 @@ def run_report(a):
                 if cand not in h:
                     continue
                 chi, ndf = deck_chi2(r.sum(0), h[cand].sum(0))
+                pv, _, nm, ns, pp = flip_null((h[cand] - r)[:, :-1])
+                dov = h[cand][:, -1] - r[:, -1]
                 rows[x] = {"chi2ndf": chi, "ndf": ndf, "n_ref": int(r.sum()), "n_arm": int(h[cand].sum()),
-                           "ov_ref": int(r[:, -1].sum()), "ov_arm": int(h[cand][:, -1].sum())}
+                           "ov_ref": int(r[:, -1].sum()), "ov_arm": int(h[cand][:, -1].sum()), "paired": pv,
+                           "null_mean": nm, "null_sd": ns, "p": pp, "ov_ratio": float(h[cand][:, -1].sum() / r[:, -1].sum()),
+                           "e_ov_ratio": float(np.sqrt(n * dov.var(ddof=1)) / r[:, -1].sum())}
             R["refs"][name] = rows
             print(f"ref {name}: " + ", ".join(f"{x} chi2/ndf {v['chi2ndf']:.3f} clusters {v['n_ref']} vs {v['n_arm']} "
-                                              f"overflow {v['ov_ref']} vs {v['ov_arm']}" for x, v in rows.items()))
+                                              f"overflow {v['ov_ref']} vs {v['ov_arm']} ratio {v['ov_ratio']:.3f} +- {v['e_ov_ratio']:.3f} "
+                                              f"paired {v['paired']:.3f} (null {v['null_mean']:.2f} +- {v['null_sd']:.2f}, p {v['p']:.1e})"
+                                              for x, v in rows.items()))
         if "a0g" in Z.files and "a1" in Z.files:
             chi, ndf = deck_chi2(Z["a0g"][idx].sum(0), Z["a1"][idx].sum(0))
             R["refs"]["a1_vs_a0g"] = {"chi2ndf": chi, "ndf": ndf}
-            print(f"stock A1 vs A0g on these shards: chi2/ndf {chi:.3f} ({ndf})")
+            pv, _, nm, ns, pp = flip_null((Z["a1"][idx] - Z["a0g"][idx])[:, :-1])
+            R["refs"]["a1_vs_a0g"].update(paired=pv, null_mean=nm, null_sd=ns, p=pp)
+            print(f"stock A1 vs A0g on these shards: chi2/ndf {chi:.3f} ({ndf}), paired {pv:.3f} (null {nm:.2f} +- {ns:.2f})")
     mu, same = load_truth(out, shards)
     R["paired"] = paired_report(C, mu, same, h)
-    print(f"\nband counts (ggg, fff, ratio, pull)")
     if a.json:
         json.dump(R, open(a.json, "w"), indent=1)
 
@@ -456,7 +628,9 @@ def attach(m, mu, same):
 def paired_report(C, mu, same, h):
     R = {}
     for label, a_, b_ in (("fff vs ggg", "ggg", "fff"), ("g fast D vs ggg", "ggg", "gfg"), ("fast P vs ggg", "ggg", "fgg"),
-                          ("primary only f vs g", "g--", "f--")):
+                          ("primary only f vs g", "g--", "f--"), ("redraw vs ggg", "ggg", "grg"),
+                          ("redraw vs fast D", "gfg", "grg"), ("descendants added, g", "g--", "ggg"),
+                          ("descendants added, f", "f--", "fff")):
         if a_ not in C or b_ not in C:
             continue
         m = match(C[a_].copy(), C[b_].copy())
