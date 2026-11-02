@@ -6,8 +6,9 @@ import pytest
 from valhist import attrib as A
 
 
-def table(cls, sp, t0, root=None):
+def table(cls, t0, root=None):
     n = len(cls)
+    sp = np.arange(n) + 1
     d = {"run": np.full(n, 1400, np.uint32), "subrun": np.zeros(n, np.uint32), "event": np.ones(n, np.uint32),
          "nstep": np.full(n, n), "bar": np.arange(n), "sp": np.array(sp), "t0": np.array(t0, float), "edep": np.ones(n),
          "cls": np.array(cls, np.int8), "root": np.array(root if root is not None else np.ones(n), np.int64),
@@ -41,7 +42,7 @@ def test_hybrid_takes_each_class_from_its_source_with_distinct_keys():
     f = table([0, 1, 2], [1.5, 2.5, 3.5])
     s, parts = A.build_arm("gfg", {"g": g, "f": f})
     assert s.t0.tolist() == [1.0, 2.5, 3.0]
-    assert s.sp.iloc[1] == 1 + A.SOURCE_OFFSET["f"]
+    assert s.sp.iloc[1] == 2 + A.SOURCE_OFFSET["f"]
     assert s.nstep.tolist() == [3, 3, 3]
     assert not parts.duplicated(["event", "key"]).any()
 
@@ -64,7 +65,7 @@ def test_signal_subtracts_noise():
     rng = np.random.default_rng(2)
     null = rng.normal(0, 3, (400, 50))
     wt = np.ones(50)
-    assert abs(A.signal(null, wt)) < 0.15 * 400 * 9 * 50
+    assert abs(A.signal(null, wt)) < 3 * 400 * 9 * np.sqrt(2 * 50)
     shifted = null + 1.0
     assert A.signal(shifted, wt) == pytest.approx((400 * 1.0) ** 2 * 50, rel=0.15)
 

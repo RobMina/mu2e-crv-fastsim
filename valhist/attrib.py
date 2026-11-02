@@ -255,8 +255,9 @@ def run_shard(a):
 
 def histogram(pe):
     """Counts in the deck's 100 bins plus overflow as a last entry."""
-    h, _ = np.histogram(pe, PE_EDGES)
-    return np.r_[h, (np.asarray(pe) >= PE_EDGES[-1]).sum()].astype(np.int64)
+    pe = np.asarray(pe, float)
+    over = pe >= PE_EDGES[-1]
+    return np.r_[np.histogram(pe[~over], PE_EDGES)[0], over.sum()].astype(np.int64)
 
 
 def run_refs(a):
