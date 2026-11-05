@@ -36,7 +36,7 @@ VIEWS = {"topo": ["grp", "topo"], "lay_topo": ["grp", "lay", "topo"]}
 def donor_crossings(path, geom):
     """Library crossings of one donor table, in library order, with muon visits (muon ids local to the file)."""
     steps, parts = S._read(path)
-    s = classify(steps, parts, geom.sector)
+    s = classify(steps, parts, geom.sector, getattr(geom, "lib_group", None))
     x = T._crossings(s.loc[s.cls.eq("mu_primary")])
     mu, vis, visits = T.muon_visits(x, geom)
     return x, mu, vis, visits
@@ -49,7 +49,8 @@ def sidecar(manifest, out, counters=None):
     tick = time.monotonic()
     m = json.loads(Path(manifest).read_text())
     library = str(Path(manifest).with_suffix(".root"))
-    geom = geometry.from_offline_config(geometry.find_counters(counters or S.COUNTERS))
+    from crvfastsim.analyses.tier1b import _counters, _geom
+    geom = _geom(counters, m.get("run_config"))
     from mu2efastsim import tables as core_tables
     lx = core_tables.read(library, "libxing")
     bins = core_tables.read(library, "libbins")
@@ -88,7 +89,7 @@ def sidecar(manifest, out, counters=None):
     np.savez_compressed(out, **{f"crossings_{k}": c[k].to_numpy() for k in c.columns},
                         **{f"visits_{k}": v[k].to_numpy() for k in v.columns})
     result = {"library": library, "library_sha256": A.digest(library), "manifest": str(manifest),
-              "geometry_sha256": A.digest(geometry.find_counters(counters or S.COUNTERS)),
+              "geometry_sha256": A.digest(_counters(counters, m.get("run_config"))),
               "code_sha256": {p: A.digest(p) for p in (__file__, T.__file__)}, "donors": records,
               "other_bar_rows": int(other.sum()), "with_topology_rows": int(has.sum()),
               "other_bar_energy": float(ld.edep.to_numpy()[other].sum()),
@@ -110,7 +111,7 @@ def read_sidecar(path, library=None):
 # ------------------------------------------------------------------------------------------------------------ census
 def topo_labels(steps, parts, geom):
     """Muon-descendant steps with their topology label relative to their own ancestor muon's crossings."""
-    s = classify(steps, parts, geom.sector)
+    s = classify(steps, parts, geom.sector, getattr(geom, "lib_group", None))
     x = (s.loc[s.cls.eq("mu_primary")].sort_values("t0", kind="stable")
          .groupby(tables.KEY + ["prim_key", "bar"], sort=False).first().reset_index())
     d = s.loc[s.cls.eq("mu_descendant")].copy()

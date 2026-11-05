@@ -85,11 +85,13 @@ path reads the library and attaches the topology, then the template sidecar, in 
 
 `--tier1b` and `--library` cannot be combined.
 
-**Named run configurations have no library of their own.** `run1a_v01`, `run1b_v01` and `run2_v10` need a custom
-`--library`: their sectors are mapped onto the extracted library groups (`runconfig.lib_group`) and their non-muon
-showers are off. A named set with a named configuration is refused. The topology and template sidecars
-describe the extracted v04 layer structure and the strict library's crossings, so they do not carry over to other
-geometries.
+**Named run configurations have no default asset set.** `run1a_v01`, `run1b_v01` and `run2_v10` can use a bare
+custom `--library` without placement, retaining their registry shower setting (off). Ordinary `runchain` also accepts
+an explicit `--native-library-dir` built on the same named geometry: it checks native sidecars, attaches module-scope
+anchors and enables that library's native-position non-muon showers. See [native-secondary-library.md](native-secondary-library.md)
+for the integrity contract and unsupported prepared/device/benchmark paths. The Run 1A library remains
+not admitted; see the [pause handoff](run1a-pause.md). Extracted sets with named configurations
+are refused: their absolute shower positions, layer structure and placement sidecars do not carry over.
 
 ## Provenance and hashing
 

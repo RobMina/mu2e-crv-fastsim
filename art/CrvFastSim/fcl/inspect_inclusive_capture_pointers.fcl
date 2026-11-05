@@ -1,0 +1,29 @@
+# Saved-raw diagnostic candidate only; dereference success is not exact membership proof.
+#include "CrvFastSim/fcl/audit_inclusive_run1a.fcl"
+process_name : R3InclusivePointerDiagnostic
+physics.analyzers.status.stepPointMCPrinter : {
+  verbose : 1
+  inputTags : [ "g4run:CRV:R3Inclusive" ]
+  pCut : -1
+}
+physics.analyzers.status.simParticlePrinter : {
+  verbose : 2
+  inputTags : [ "g4run::R3Inclusive" ]
+  pCut : -1
+  emPcut : -1
+  primaryOnly : false
+}
+physics.analyzers.pointers : {
+  module_type : PointerCheck
+  verbose : 1
+  skipDereference : false
+  skipSimParticle : []
+  skipSimParticlePtr : []
+  skipStepPointMC : []
+  skipMCTracjectory : []
+  skipStrawDigiMC : []
+  skipCaloHitMC : []
+  skipCaloShowerStep : []
+  skipCrvDigiMC : []
+}
+physics.inspect : [ status, pointers, productList ]

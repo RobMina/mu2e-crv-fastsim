@@ -1,8 +1,8 @@
 """census -- what reaches the CRV, by CrvStep origin (docs/plan.md section 3.3), from CrvStep tables.
 
-Each CrvStep's SimParticle is traced to its primary through the parent chain (vectorised: repeated parent lookups over
-all particles at once, bounded by the deepest chain) and classed as the primary muon itself, a descendant of a primary
-muon, a non-muon primary, or a non-muon descendant. Reports visible-energy and step shares overall and per sector,
+Each CrvStep's SimParticle is traced to its primary through the parent chain (vectorised: exact parent lookups and
+logarithmic-depth pointer doubling) and classed as the primary muon itself, a descendant of a primary muon, a non-muon
+primary, or a non-muon descendant. Reports visible-energy and step shares overall and per sector,
 the non-muon share by primary pdg, steps and bars per event, and the fraction of events with muon-origin deposits only.
 Batchable: the counts add.
 
@@ -21,40 +21,88 @@ from .. import geometry, tables
 
 CLASSES = ("mu_primary", "mu_descendant", "nonmu_primary", "nonmu_descendant")
 SECTOR_GROUP = np.array(["EX", "T1", "T2"] + ["M"] * 8)
-MAX_DEPTH = 1000
 STEP_CAP = 2000  # steps-per-event histogram range; the mean is kept exact from steps_sum
 DEFAULT_COUNTERS = "Offline/Mu2eG4/geom/crv_counters_extracted_v04.txt"
 
 
+def _integers(values, label):
+    """Validate exact signed-int64-compatible indices without a float conversion."""
+    a = np.asarray(values)
+    if a.ndim != 1 or a.dtype.kind not in "iu":
+        raise ValueError(f"{label}: requires a one-dimensional integer array")
+    if a.dtype.kind == "u" and np.any(a > np.iinfo(np.int64).max):
+        raise ValueError(f"{label}: exceeds signed int64")
+    return a.astype(np.int64, copy=False)
+
+
+def _identity(frame, columns, label):
+    """Exact integer tuple index, retaining the complete event identity."""
+    return pd.MultiIndex.from_arrays([_integers(frame[c], f"{label}.{c}") for c in columns], names=columns)
+
+
 def primary_of(parts):
-    """For every particle row, the key and pdg of its primary ancestor (same event); -1 where the chain breaks."""
+    """Return primary key/PDG per row; broken or cyclic chains have key=-1 and PDG=0.
+
+    Only parent=-1 denotes a root; a missing nonnegative parent never becomes one.
+    """
     p = parts[tables.KEY + ["key", "parent", "pdg"]].copy()
-    p["uid"] = np.arange(len(p))
-    lut = p.set_index(tables.KEY + ["key"]).uid
-    par_uid = lut.reindex(pd.MultiIndex.from_frame(p[tables.KEY + ["parent"]])).to_numpy()
-    par_uid = np.where(np.isnan(par_uid), -1, par_uid).astype(np.int64)
-    cur = np.arange(len(p))
-    for _ in range(MAX_DEPTH):
-        nxt = par_uid[cur]
-        step = nxt >= 0
-        if not step.any():
+    rows = np.arange(len(p), dtype=np.int64)
+    p["uid"] = rows
+    keys = _identity(p, tables.KEY + ["key"], "particles")
+    if not keys.is_unique:
+        raise ValueError("particles: duplicate event/particle keys")
+    key = _integers(p.key, "particles.key")
+    if np.any(key < 0):
+        raise ValueError("particles.key: must be nonnegative")
+    parent = _integers(p.parent, "particles.parent")
+    par_uid = keys.get_indexer(_identity(p, tables.KEY + ["parent"], "particles"))
+    ancestors = np.where((parent >= 0) & (par_uid >= 0), par_uid, rows)
+    # After at least N links every valid chain ends at a root; cycles and broken chains cannot pass the root check.
+    for _ in range(len(p).bit_length()):
+        advanced = ancestors[ancestors]
+        if np.array_equal(advanced, ancestors):
             break
-        cur = np.where(step, nxt, cur)
-    is_root = par_uid[cur] < 0
-    p["prim_key"] = np.where(is_root, p.key.to_numpy()[cur], -1)
-    p["prim_pdg"] = np.where(is_root, p.pdg.to_numpy()[cur], 0)
+        ancestors = advanced
+    rooted = parent[ancestors] == -1
+    p["prim_key"] = np.where(rooted, key[ancestors], -1)
+    p["prim_pdg"] = np.where(rooted, p.pdg.to_numpy()[ancestors], 0)
     return p
 
 
-def classify(steps, parts, sector_of_bar):
+def classify(steps, parts, sector_of_bar, group_of_sector=None):
+    """Classify step ancestry and geometry groups; default groups describe the extracted geometry."""
+    sectors = _integers(sector_of_bar, "sector_of_bar")
+    groups = np.asarray(SECTOR_GROUP if group_of_sector is None else group_of_sector)
+    if groups.ndim != 1:
+        raise ValueError("group_of_sector: requires a one-dimensional array")
+    if np.any((sectors < 0) | (sectors >= len(groups))):
+        raise ValueError("sector_of_bar: sector outside group_of_sector bounds")
+    bars = _integers(steps.bar, "steps.bar")
+    if np.any((bars < 0) | (bars >= len(sectors))):
+        raise ValueError("steps.bar: bar outside sector_of_bar bounds")
     p = primary_of(parts)
-    s = steps.merge(p[tables.KEY + ["key", "prim_key", "prim_pdg"]].rename(columns={"key": "sp"}),
-                    on=tables.KEY + ["sp"], how="left")
-    mu = s.prim_pdg.abs() == 13
-    own = s.sp == s.prim_key
+    rows = _identity(p, tables.KEY + ["key"], "particles").get_indexer(
+        _identity(steps, tables.KEY + ["sp"], "steps"))
+    matched = rows >= 0
+    prim_key = np.full(len(steps), -1, dtype=np.int64)
+    prim_pdg = np.zeros(len(steps), dtype=p.prim_pdg.dtype)
+    prim_key[matched] = p.prim_key.to_numpy()[rows[matched]]
+    prim_pdg[matched] = p.prim_pdg.to_numpy()[rows[matched]]
+    s = steps.reset_index(drop=True).copy()
+    # Nullable integers retain missing-step associations without rounding large primary keys through float64.
+    if matched.all():
+        s["prim_key"], s["prim_pdg"] = prim_key, prim_pdg
+    else:
+        s["prim_key"] = pd.arrays.IntegerArray(prim_key, ~matched)
+        if prim_pdg.dtype.kind in "iu":
+            s["prim_pdg"] = pd.arrays.IntegerArray(prim_pdg, ~matched)
+        else:
+            s["prim_pdg"] = np.where(matched, prim_pdg, np.nan)
+    mu = np.abs(prim_pdg) == 13
+    own = _integers(steps.sp, "steps.sp") == prim_key
     s["cls"] = np.select([mu & own, mu & ~own, ~mu & own, ~mu & ~own], CLASSES, default="unknown")
-    s.loc[s.prim_key.isna() | (s.prim_key < 0), "cls"] = "unknown"
-    s["group"] = SECTOR_GROUP[np.asarray(sector_of_bar)[s.bar.to_numpy()]]
+    s.loc[~matched | (prim_key < 0), "cls"] = "unknown"
+    s["group"] = groups[sectors[bars]]
     return s
 
 

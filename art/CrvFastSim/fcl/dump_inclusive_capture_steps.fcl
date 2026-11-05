@@ -1,0 +1,4 @@
+# Direct associations refer to saved raw transport, not a new G4 process.
+#include "CrvFastSim/fcl/dump_inclusive_run1a.fcl"
+physics.analyzers.dump.crvSteps : "CrvSteps::R3InclusiveSteps"
+services.TFileService.fileName : "inclusive-converted-steps.root"

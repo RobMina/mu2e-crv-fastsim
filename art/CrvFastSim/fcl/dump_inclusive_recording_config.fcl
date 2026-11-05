@@ -1,0 +1,8 @@
+# Resolve only the original capture geometry; no G4 or CrvSteps producer is scheduled.
+#include "CrvFastSim/fcl/dump_inclusive_raw_integrity.fcl"
+physics.analyzers.recording : {
+  module_type : CrvRecordingConfigDumper
+  inputFile : "Production/JobConfig/cosmic/geom_cosmic_run1_a.txt"
+  allowReplacement : true
+}
+physics.integrity : [ rawdump, recording ]

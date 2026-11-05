@@ -1,0 +1,6 @@
+# Direct uncompressed associations preserve original source generator pointers.
+#include "CrvFastSim/fcl/dump_crvsteps.fcl"
+physics.analyzers.dump.genParticles : "cosmicTimeOffset::Primary"
+physics.analyzers.dump.simParticles : "g4run::R3Inclusive"
+physics.analyzers.dump.crvSteps : "CrvSteps::R3Inclusive"
+services.TFileService.fileName : "inclusive-steps.root"

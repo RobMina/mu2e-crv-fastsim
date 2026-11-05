@@ -2,11 +2,14 @@
 
 `v2compare --run-config` groups the V2 metrics by the sector types of a named run configuration. Without it the
 extracted V2 state schema is unchanged. It does not establish physics closure or certify a reference campaign.
+These inherited diagnostic capabilities do not admit a [native library](native-library-build.md#construction-domain-restriction)
+or remove its multi-primary guard. See the [Run 1A pause handoff](run1a-pause.md) and
+[saved-raw contract](native-raw-integrity.md) for the separate pending build/readback gates.
 
 ## Named V2 API
 
 ```python
-from crvfastsim.analyses import v2compare
+from crvfastsim.validation import v2compare
 
 result = v2compare.run(
     ["candidate.root"], "report", compare=["reference.root"],
@@ -59,7 +62,7 @@ primary-muon truth crossings and a fixed 8 PE pulse threshold, not extrapolated
 track efficiency, not the Run2 sector-specific coincidence cuts, and not a
 module-gap dead-width measurement. It does not participate in `pass`. The agreed
 track-efficiency/gap-width and MC–data guard-rail rows remain unimplemented.
-`metrics_pass` therefore covers only implemented metrics, not all of plan.md V2; overall `pass` remains false.
+`metrics_pass` therefore covers only implemented metrics, not all of [plan.md V2](plan.md); overall `pass` remains false.
 
 Rates default to dumped art events. Existing `generated=` and
 `compare_generated=` arguments can replace those denominators; their validity
@@ -89,6 +92,63 @@ accumulation. Missing-tree evidence survives merges. The summary decodes the
 identity as a JSON object for readability. These are compatibility checks, not
 cryptographic source authenticity or a defense against deliberately rewritten
 state files. Parsed counters are hashed semantically; source comments are not.
+
+## Stock implementation versions
+
+Matching saved event populations and conditions is not enough to compare finder implementations: older stock
+backings can lack the later opposite-side pulse-attachment stage. A membership discrepancy shared by NumPy and JAX
+must not be called a device defect without checking that stock source boundary. The explicit no-attachment control
+in `scripts/check_named_coinc.py` diagnoses historical behavior only; it neither changes the named default nor
+certifies a current-stock V-R3 chain. Keep raw/default differences alongside any historical diagnostic agreement.
+Shared-lookup scintillation-yield ownership is a separate response-version diagnostic, not a fitted PE correction.
+Do not assume a newer release fixes either boundary: verify the actual photon-generator reuse predicate, finder
+attachment stage, resolved configuration and loaded plugin bytes. Per-sector standalone photon objects cannot test
+the art producer's sharing of those objects. A source-only fix without a matching built runtime is not an oracle.
+
+## Strict named fasttables
+
+```bash
+python3 -m valhist.fasttables chain steps.root fast.root \
+  --run-config run1a_v01 --conditions-manifest /data/conditions/run1a/manifest.json \
+  --window offspill --event-reference stock.root --write-receipt
+```
+
+With `--run-config`, a strict [conditions bundle](named-conditions.md) is mandatory; `--calib`, `--deviation`
+and `--counters` cannot override it. Geometry, response and default finder settings come from the named configuration.
+The exposed `--no-opposite-side` finder control is diagnostic only and is refused by normal receipt validation.
+Writing a receipt does not establish that its subsequent validation or admission succeeded.
+The physical SiPM presence mask is applied by default in both named and extracted modes, including ordinary
+`runchain` and prepared CSV contexts. The extracted defaults are retained; no named asset or setting is promoted.
+
+`--window offspill` crops absolute times to 0–100000 ns; `onspill` crops to 200–1500 ns. Neither implements stock
+per-event spill/evlen/pbtime timing or proves onspill equivalence. Reco mode uses the supplied stock digis without
+another crop. `--event-reference` selects exact stock run/subrun/event identities, preserving zero-step events;
+it is a conditional population, not generated exposure or a transport acceptance check.
+
+Named runs write descriptive `OUT.root.metadata.json`. `--write-receipt` additionally snapshots inputs before
+production and binds output, source, configuration and event identities; see [response-receipts.md](response-receipts.md).
+Existing receipt outputs are refused. Receipts do not certify the stock producer's geometry or physics closure.
+V2's `--candidate-receipt RECEIPT --conditions-manifest MANIFEST` revalidates exactly one candidate/reference pair
+against the recorded stock population. Emit/merge/generated-denominator/counters overrides are refused in this mode;
+**overall named V2 remains unsupported**, even when integrity and implemented metrics pass.
+
+Ordinary `runchain --conditions-manifest MANIFEST` accepts the same bundle instead of calibration/deviation CSVs.
+It validates against the configuration's original window before applying an explicit cosmic crop and then applies
+the default physical mask. Prepared contexts and benchmark callbacks reject manifests before setup because their
+asset inventory covers CSVs, not complete bundles.
+
+## Explicit diagnostics
+
+`--stock-shared-yield-fcl resolved.fcl` emulates the historical stock first-sector scintillation yield for each
+shared lookup filename. Sector order, declared yields, reflectors and photon scales must match the named response.
+This is diagnostic emulation of stock object sharing, not PE tuning or a calibrated correction. It requires a named
+step arm and `--event-reference`, records the resolved-FCL hash and changes, and cannot enter normal receipt admission.
+No registry response is mutated.
+
+`--trace-response` observes actual response function dispatch and fails before output publication if backend
+workload evidence is insufficient. It requires named local step inputs and excludes receipt admission. The explicit
+`--jax --fused-response` diagnostic also requires the trace and offspill window. It does not change the normal
+backend or device defaults; see [response-execution-trace.md](response-execution-trace.md).
 
 ## Local tests
 

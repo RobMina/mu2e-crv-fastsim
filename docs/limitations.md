@@ -37,9 +37,11 @@ PE tail above 2000 PE (0.923 +- 0.014 -> 0.991 +- 0.014), and the adjacent-layer
 
 - Only the **extracted (KPP) configuration** (`extracted_v04`) is supported end to end. The named configurations
   (`run1a_v01`, `run1b_v01` = alias of Run 1A, `run2_v10`) have transport, geometry and conditions code, but their
-  only tier-1b set (`legacy`) was built from a library file that no longer exists, so a named chain cannot run until a
-  library is rebuilt for it. The `strict_v*` sets describe the extracted layer structure and are refused for named
-  configurations.
+  installed tier-1b defaults are absent. An explicit [native bundle](native-secondary-library.md) can run the
+  ordinary named chain with strict conditions and optional detailed diagnostic output, but that is not end-to-end
+  physics support. No inclusive Run 1A library is admitted or merge-ready; its whole-input multi-primary guard
+  remains. See the [pause handoff](run1a-pause.md). The `strict_v*` sets describe the extracted layer structure and
+  are refused for named configurations.
 - **Run 2 V1 fails** (primary-muon crossings vs Geant4, 1 M events): the CRV that wraps the DS needs below-plane
   scatter-in; the experimental marcher is on branch `park/named-run2`. Run 1A V1 passes.
 - No magnetic field: the transport is straight-line plus multiple scattering, valid for the extracted configuration.
@@ -94,10 +96,11 @@ PE tail above 2000 PE (0.923 +- 0.014 -> 0.991 +- 0.014), and the adjacent-layer
 - Below-plane scatter-in for the CRV that wraps the DS (`--below-scatter-in`, `transport.scatter_in_crossings`,
   Run 2 algorithm development; not converged, V1 Run 2 still fails): branch `park/named-run2`.
 
-- Named-run provenance and diagnostics: strict conditions bundles (`named_conditions`, `--conditions-manifest`),
-  fasttable receipts and the V2 receipt audit (`response_receipt`, `--write-receipt`, `--candidate-receipt`), the
-  fasttable named mode (`--run-config`, `--event-reference`), the stock shared-yield emulation
-  (`--stock-shared-yield-fcl`) and the response-execution trace (`--trace-response`): branch `park/named-run2`.
+## Inherited diagnostic functionality
+
+Named conditions bundles, prospective response receipts and execution traces are present in this development
+branch for explicit conditional diagnostics; see [named-response.md](named-response.md). They do not certify named
+V2, V4, V-R or end-to-end physics. The stock shared-lookup first-yield emulation is diagnostic only, never a default.
 
 ## Inputs
 

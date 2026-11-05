@@ -6,13 +6,19 @@ Musing, so `off/` is not touched:
 | module | role |
 |---|---|
 | `CrvStepTableDumper` | CrvSteps, SimParticles, GenParticles (+ CosmicLivetime per subrun) -> flat TTrees `steps`, `particles`, `gen`, `subruns`. uproot cannot read these art products directly (`CrvStep` strided-size mismatch, memberwise `SimParticle`/`GenParticle`) |
+| `CrvRawIntegrityDumper` | Saved original generator/SimParticle/raw-CRV collections -> exact full-width pointer diagnostics, all daughter edges, serialized StatusG4 and complete event census; no transport or conversion. |
+| `CrvRecordingConfigDumper` | Pinned SimpleConfig geometry resolution -> effective CRV hit-cap configuration and reconstruction evidence; no G4 world. |
+
+The two standalone saved-raw readers are implemented and passed syntax-only checks against Offline v13_39_00/p107.
+Their linked user build, plugin loading and actual saved-art readback remain pending. See the
+[raw-integrity contract](../docs/native-raw-integrity.md); configuration reconstruction is not measured hit completeness.
 
 Work area: this `art/` directory itself (`setup_area.sh` adds the `backing` link to the CVMFS Musing `SimJob MDC2025ay`;
 `build/` and `backing` are git- and sync-ignored). `CrvFastSim` must stay a real directory: muse skips symlinked repos.
-Build (on a Mu2e build machine):
+The user builds on `mu2ebuild02`; the saved-raw readers require the pinned p107 variant:
 
 ```bash
-cd $CRVFS_CODE/art && source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh && setup muse && muse setup && muse build -j 32
+cd $CRVFS_CODE/art && source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh && setup muse && muse setup -q p107 && muse build -j 32
 ```
 
 Run: `mu2e -c CrvFastSim/fcl/dump_crvsteps.fcl -s dts....art` (and `dump_gen.fcl` on the gen stream).
@@ -20,7 +26,9 @@ Run: `mu2e -c CrvFastSim/fcl/dump_crvsteps.fcl -s dts....art` (and `dump_gen.fcl
 Schema v2 validates pointer ProductIDs/keys and adds an event census. Donor dumps select compressed generators;
 `dump_gen.fcl` explicitly keeps the complete `cosmicTimeOffset` stream for exposure. Old donor tables require a
 new dump before building libraries; old libraries remain available for baseline comparisons. Build/validation
-procedure: `../docs/generator-association-repair.md` (branch `park/tier1b-library`).
+procedure: [native construction/input checks](../docs/native-library-build.md) and the
+[saved-raw contract](../docs/native-raw-integrity.md). The historical generator-association repair page lives on
+`park/tier1b-library`, not in this checkout.
 The `events` census tree also keeps the v1 branches `ngen` and `nsteps` (`nsteps=-1` with `writeSteps=false`:
 not extracted, not zero) that the opt-in Cat v2 contract (branch `park/veto-closure`) reads; that contract requires a
 successful full-source extraction and explicit source/extraction provenance, and legacy converter/mixer behaviour is

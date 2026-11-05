@@ -9,8 +9,12 @@ files of the stock chain on the same shards) it reports clusters per generated e
 
 Tier 1b (crvfastsim.tier1b_assets): default asset set strict_v5 for extracted_v04 (strict library with step-tree roots,
 crossing context, containment, point and topology placement, v3 templates, chord placement, root-coherent draws);
-strict_v4 (hard-muon draws instead of root-coherent ones) is the previous default; the named run configurations have no
-set and need --library, a custom library sampled without placement options.
+strict_v4 (hard-muon draws instead of root-coherent ones) is the previous default. Named configurations have no default
+set: --native-library-dir explicitly loads a checked native anchored bundle, including native non-muon showers;
+--library remains a custom library sampled without placement options. Native bundles support ordinary runs only.
+
+Strict named conditions manifests are supported by ordinary runs only, mutually exclusive with calibration CSVs.
+Prepared contexts and benchmark callbacks reject manifests because their asset inventory covers CSV setup only.
 """
 import json
 import os
@@ -36,10 +40,12 @@ SECTOR_TYPES = {1: "EX", 2: "T1", 3: "T2", 4: "M"}
 
 
 def _resolve(library, calib, deviation, gdml, jax, counters, run_config, window, fused_response=False,
-             tier1b_set=None, tier1b_dir=None):
+             tier1b_set=None, tier1b_dir=None, conditions_manifest=None, native_library_dir=None):
     """Resolve setup arguments without loading large assets or drawing random numbers."""
-    if not calib:
-        raise SystemExit("runchain needs --calib (a CRVCalib CSV or nominal)")
+    if conditions_manifest is not None and (calib is not None or deviation is not None):
+        raise SystemExit("--conditions-manifest cannot be combined with --calib or --deviation")
+    if not (calib or conditions_manifest):
+        raise SystemExit("runchain needs either --calib or --conditions-manifest")
     from .transport import default_gdml
     rc, time_window = resolve_runchain_window(run_config, window)
     if counters:
@@ -49,7 +55,12 @@ def _resolve(library, calib, deviation, gdml, jax, counters, run_config, window,
         cfg = dataclasses.replace(cfg, fused_response=True)
     gdml_path = gdml or (rc.gdml_path() if rc.name != runconfig.DEFAULT else default_gdml())
     try:
-        spec = tier1b_assets.resolve(tier1b_set, library, tier1b_dir, rc.name)
+        if native_library_dir is not None:
+            if any(p is not None for p in (library, tier1b_set, tier1b_dir)):
+                raise ValueError("--native-library-dir cannot be combined with --library, --tier1b or --tier1b-dir")
+            spec = tier1b_assets.native_bundle(native_library_dir, rc)
+        else:
+            spec = tier1b_assets.resolve(tier1b_set, library, tier1b_dir, rc.name)
     except ValueError as e:
         raise SystemExit(f"runchain: {e}")
     return rc, cfg, gdml_path, time_window, spec
@@ -94,8 +105,10 @@ class PreparedContext:
 
 def prepare(library=None, calib=None, deviation=None, gdml=None, jax=False, counters=None,
             run_config=None, window=None, benchmark=None, fused_response=False,
-            below_margin=None, tier1b_set=None, tier1b_dir=None):
-    """Load and seal reusable CSV setup."""
+            below_margin=None, tier1b_set=None, tier1b_dir=None, conditions_manifest=None):
+    """Load and seal reusable CSV setup; strict manifest bundles require ordinary runs."""
+    if conditions_manifest is not None:
+        raise ValueError("conditions manifests are not supported with prepared contexts or benchmarks")
     if fused_response:
         raise ValueError("prepared context does not support memory-dependent fused response batching")
     from .context_audit import freeze_arrays, content_fingerprint
@@ -134,12 +147,17 @@ def prepare(library=None, calib=None, deviation=None, gdml=None, jax=False, coun
     return PreparedContext(sig, MappingProxyType(payload), propagation, template, template_args, fingerprint, device, timers)
 
 
-def _load_setup(rc, cfg, gdml_path, explicit_gdml, spec, calib, deviation, jax, below_margin=None):
+def _load_setup(rc, cfg, gdml_path, explicit_gdml, spec, calib, deviation, jax, below_margin=None,
+                conditions_manifest=None, configured_rc=None):
     geometry_start = time.perf_counter()
     geom = rc.geometry()
     ccfg = rc.counters_cfg()
     conditions_metadata = {"status": "unverified_legacy", "calib": calib, "deviation": deviation}
-    cond = runconfig.nominal_conditions(geom) if calib == "nominal" else chain.Conditions.from_csv(calib, deviation)
+    if conditions_manifest is not None:
+        from ..named_conditions import load_conditions
+        cond, conditions_metadata = load_conditions(conditions_manifest, configured_rc, geom)
+    else:
+        cond = runconfig.nominal_conditions(geom) if calib == "nominal" else chain.Conditions.from_csv(calib, deviation)
     if len(cond.status) < 4 * geom.nbars:
         raise SystemExit(f"runchain: conditions cover {len(cond.status)} channels, {rc.name} has {4 * geom.nbars}; "
                          "pass the configuration's CRVCalib CSV or --calib nominal")
@@ -167,10 +185,36 @@ def _load_setup(rc, cfg, gdml_path, explicit_gdml, spec, calib, deviation, jax, 
                 conditions_metadata=conditions_metadata), timers
 
 
+def _native_generator_input(path, spec, max_events=None):
+    """Select strict native exposure from the full event census, including empty generator events."""
+    from .. import genassoc
+    import pandas as pd
+    report = genassoc.validate_generator_stream(path)
+    if report.get("schema_version") != 2 or report.get("stream_role") != "full generator stream":
+        raise ValueError("native chain requires a strict schema-v2 full generator stream")
+    universe = genassoc.generator_event_keys(path).sort_values(tables.KEY).reset_index(drop=True)
+    training = pd.DataFrame(spec.native["training_shards"])
+    if len(universe.merge(training, on=["run", "subrun"], how="inner", validate="many_to_one")):
+        raise ValueError("native chain validation overlaps training shards")
+    if max_events is not None:
+        if type(max_events) is not int or max_events <= 0:
+            raise ValueError("native chain max-events must be a positive integer")
+        universe = universe.iloc[:max_events].copy()
+    if not len(universe):
+        raise ValueError("native chain requires nonempty generated exposure")
+    if (universe[tables.KEY].to_numpy() < 0).any() or (universe.event >= 2**20).any():
+        raise ValueError("native chain event identities exceed nonnegative 20-bit event capacity")
+    feb_limit = (np.iinfo(np.int64).max // 1_000_000 >> 20) - 1
+    if universe.run.nunique() != 1 or (universe.subrun > feb_limit).any():
+        raise ValueError("native chain requires one run and safe packed FEB-label subruns")
+    gen = tables.read(path, "gen").merge(universe, on=tables.KEY, how="inner", validate="many_to_one")
+    return gen, universe
+
+
 def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax=False, max_events=None, seed=1,
         compare=None, counters=None, reco_cpu=False, emit=None, run_config=None, window=None, benchmark=None,
         prepared=None,
-        tier1b_set=None, tier1b_dir=None,
+        tier1b_set=None, tier1b_dir=None, conditions_manifest=None, native_library_dir=None, native_output=None,
         transport_context=None, tier1b_context=None, tier1b_backend="numpy",
         gen="table", gen_events=None, gen_seed=None, gen_subrun=1, **kw):
     removed = sorted(set(kw) & {"msc_tail", "tail_k", "sliced_msc", "first_muon_only", "no_absorbers",
@@ -198,16 +242,36 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
     elif gen_events is not None or gen_seed is not None:
         raise ValueError("gen-events/gen-seed require --gen native")
     native_receipt = None
+    if native_output is not None:
+        if native_library_dir is None or conditions_manifest is None or native or compare or emit:
+            raise ValueError("native-output requires an explicit native bundle/conditions and no compare/emit")
+        from .. import native_record
+        native_record.require_new(native_output)
+    if native_library_dir is not None and (prepared is not None or benchmark is not None):
+        raise ValueError("native library bundles are not supported with prepared contexts or benchmarks")
+    if conditions_manifest is not None and (prepared is not None or benchmark is not None):
+        raise ValueError("conditions manifests are not supported with prepared contexts or benchmarks")
     bench_start = time.perf_counter() if benchmark is not None else None
     rc, cfg, gdml_path, time_window, spec = _resolve(library, calib, deviation, gdml, jax, counters, run_config, window,
-                                                     kw.get("fused_response", False), tier1b_set, tier1b_dir)
+                                                     kw.get("fused_response", False), tier1b_set, tier1b_dir,
+                                                     conditions_manifest=conditions_manifest,
+                                                     native_library_dir=native_library_dir)
+    files = list(tables.expand(inputs))
+    if spec.native is not None and len(files) != 1:
+        raise ValueError("native chain validation requires one generator shard per run")
+    record_before = native_record.snapshot(files, spec, rc, gdml_path, conditions_manifest) if native_output else None
     for warning in time_window["warnings"]:
         print(f"# time window: {warning}", flush=True)
     if benchmark is not None:
         benchmark.setup(rc, cfg, gdml_path, spec, calib, deviation)
     t0 = time.perf_counter()
     if prepared is None:
-        payload, T = _load_setup(rc, cfg, gdml_path, gdml, spec, calib, deviation, jax, kw.get("below_margin"))
+        manifest_kw = {}
+        if conditions_manifest is not None:
+            configured_rc = dataclasses.replace(rc, window=tuple(time_window["configured_window_ns"]))
+            manifest_kw = dict(conditions_manifest=conditions_manifest, configured_rc=configured_rc)
+        payload, T = _load_setup(rc, cfg, gdml_path, gdml, spec, calib, deviation, jax, kw.get("below_margin"),
+                                 **manifest_kw)
         if benchmark is None:
             T.pop("geometry_conditions_config_s")
     else:
@@ -261,6 +325,8 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
         if tier1b_context is not None:
             tier1b_context["device"] = device_tier1b
 
+    record_payload = {}
+
     def host_stage(i, f):
         """CPU part of file i (read, transport, tier 1b) with its own rng and timers: the same draws whether it runs
         inline or in the prefetch thread."""
@@ -279,16 +345,18 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
             with Source(CosmicConfig.extracted(gdml_path), seed=seed if gen_seed is None else gen_seed) as source:
                 gen, _, native_receipt = source.generate(gen_events, subrun=gen_subrun)
             t["generation_s"] = time.perf_counter() - started
+        elif spec.native is not None:
+            gen, universe = _native_generator_input(f, spec, max_events)
         else:
             gen = tables.read(f, "gen")
         if benchmark is not None:
             t["input_io_s"] = time.perf_counter() - a
             benchmark.check_input(i, f, gen)
-        if max_events:
+        if max_events and spec.native is None:
             keep = gen.event.isin(np.sort(gen.event.unique())[:int(max_events)])
             gen = gen[keep].reset_index(drop=True)
         keys = gen[tables.KEY].drop_duplicates().to_numpy() if benchmark is not None else None
-        ngen = int(gen[tables.KEY].drop_duplicates().shape[0])
+        ngen = len(universe) if spec.native is not None else int(gen[tables.KEY].drop_duplicates().shape[0])
         a = time.perf_counter()
         if device_transport is not None:
             st, pa = run_device_transport(gen, geom, rng, prepared=device_transport)
@@ -298,15 +366,18 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
                                   below_msc=below is not None and (rc.below_msc or bool(kw.get("below_msc"))))
         t["transport_s"] = time.perf_counter() - a
         a = time.perf_counter()
+        sample_options = {"showers": rc.showers, **spec.options}
         if device_tier1b is None:
-            st, pa, _ = tier1b.sample(st, pa, gen, lib, geom, rng, showers=rc.showers, **spec.options)
+            st, pa, sample_info = tier1b.sample(st, pa, gen, lib, geom, rng, **sample_options)
         else:
             device_rng = DeviceRandom(int(rng.integers(0, 2**32, dtype=np.uint32)))
-            st, pa, _ = device_tier1b.sample(st, pa, gen, device_rng, showers=rc.showers, **spec.options)
+            st, pa, sample_info = device_tier1b.sample(st, pa, gen, device_rng, **sample_options)
         t["tier1b_s"] = time.perf_counter() - a
+        if native_output:
+            record_payload.update(universe=universe, sample_counts={name: sample_info[name] for name in
+                                  ("desc_steps", "desc_dropped", "desc_clamped", "showers", "shower_steps", "nonmu_primaries")})
         return ngen, st, pa, rng, t, keys
 
-    files = list(tables.expand(inputs))
     pool = None
     if kw.get("prefetch") and len(files) > 1:   # file i+1's host stage runs while the device works on file i
         from concurrent.futures import ThreadPoolExecutor
@@ -335,7 +406,7 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
             if benchmark is not None:
                 file_timers["waveform_pack_s"] = time.perf_counter() - a
             a = time.perf_counter()
-            detail_kw = {"detail": True} if benchmark is not None else {}
+            detail_kw = {"detail": True} if benchmark is not None or native_output else {}
             if reco_cpu and jax:   # response on the accelerator, reco with the JAX CPU backend (oneAPI: reco kernels slow)
                 import jax as _jax
                 with _jax.default_device(_jax.devices("cpu")[0]):
@@ -343,6 +414,15 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
             else:
                 outs, _ = chain.clusters(W, cond, geom, ccfg, cfg, timers=file_timers, **detail_kw)
             file_timers["reco_s"] = file_timers.get("reco_s", 0.0) + time.perf_counter() - a
+            if native_output:
+                tier1b_assets._check_native(spec, geom)
+                native_record_info = native_record.write(native_output, record_payload["universe"], st, pa, D, outs,
+                                                         record_before, rc, cfg, spec, record_payload["sample_counts"], seed=int(seed),
+                                                         effective_transport=dict(range_out=bool(range_out),
+                                                         below_msc=below is not None and (rc.below_msc or bool(kw.get('below_msc'))),
+                                                         below_margin=rc.below_margin if kw.get('below_margin') is None else kw['below_margin'],
+                                                         backend=kw.get('transport_backend', 'numpy'),
+                                                         gdml_sha256=tier1b_assets.sha256(gdml_path)))
             if benchmark is not None:
                 for k_, v_ in file_timers.items():
                     T[k_] = T.get(k_, 0) + v_
@@ -368,6 +448,8 @@ def run(inputs, outdir, library=None, calib=None, deviation=None, gdml=None, jax
            "run_config": rc.name, "window": list(cfg.window), "time_window": time_window,
            "clusters_per_generated": {stype_name.get(int(k), str(k)): float((cl_type == k).sum() / n_gen)
                                       for k in np.unique(cl_type)}}
+    if native_output:
+        res["native_record"] = native_record_info
     if native_receipt is not None:
         live = native_receipt["live_seconds"]
         res["native_generator"] = native_receipt
@@ -427,7 +509,7 @@ def merge(inputs, outdir, wall=None, **kw):
         raise ValueError("runchain merge: incompatible conditions provenance")
     if J[0].get("conditions") is not None:
         time_metadata["conditions"] = J[0]["conditions"]
-    t1b = lambda j: {k: (j.get("tier1b") or {}).get(k) for k in ("set", "options", "library_sha256")}
+    t1b = lambda j: {k: (j.get("tier1b") or {}).get(k) for k in ("set", "options", "library_sha256", "native")}
     if any(t1b(j) != t1b(J[0]) for j in J[1:]):
         raise ValueError("runchain merge: shards ran different tier-1b asset sets")
     if J[0].get("tier1b") is not None:

@@ -20,7 +20,7 @@ This repository holds code only: no Mu2e-internal conditions, tables, data or re
 | response (photons, SiPM) | NumPy; JAX with `--jax` | V4 pass on CPU and GPU (A100, PVC, B200, T4) |
 | waveforms, pulses, coincidences | NumPy; JAX with `--jax` | V-R1..V-R5 pass; fast response + reco on fast steps 0/133 histograms flagged vs stock |
 | whole chain vs Geant4 + stock | | 5 M held-out events, paired per-shard statistic: cluster PE chi2/ndf 1.09 (fast steps), 1.50 end to end; clusters above 2000 PE 0.991 +- 0.014; counts within 0.4 %; NPc, wide-range multiplicities and descendant steps at the bar ends open |
-| named configurations (Run 1A, Run 2) | | Run 1A V1 pass, Run 2 V1 fail; no tier-1b library: cannot run end to end |
+| named configurations (Run 1A, Run 2) | no named-chain default | Run 1A V1 pass, Run 2 V1 fail; explicit native [library construction/loading](docs/native-library-build.md) and [ordinary host-chain diagnostics](docs/native-secondary-library.md), not physics closure |
 | device precision | float32 in the device kernels (float64 one variable away) | within the float64 seed spread on 100 shards; pulse PE offset bounded at <= 0.3 % (`docs/device-precision.md`) |
 
 Numbers, samples, thresholds and commits: [`docs/validation.md`](docs/validation.md). What is missing or not
@@ -38,7 +38,7 @@ cp site.env.example site.env        # fill M2FS_INPUTS (verified input release),
 source site.env
 python3 -m pytest -q -p no:cacheprovider crv/tests          # JAX tests skip without JAX
 G="$CRVFS_DATA/g4ref_v2_tables/gen.001400_00000022.root"; GEOM="$CRVFS_DATA/geometry"
-python3 -m crvfastsim runchain "$G" --tier1b-dir "$CRVFS_DATA/tier1b_strict_v2" \
+python3 -m crvfastsim runchain "$G" --tier1b-dir "$CRVFS_DATA/tier1b_strict_v5" \
   --gdml "$GEOM/mu2e_extracted_v04.gdml" --calib "$GEOM/crvcalib_sim_best_v1_5_run1400.csv" \
   --deviation "$GEOM/crvphoton_sim_best_v1_5_run1400.csv" --max-events 1000 --seed 22 --outdir "$M2FS_DATA/crv-smoke"
 ```
@@ -64,7 +64,9 @@ Docs: [`architecture.md`](docs/architecture.md) (stages, backends, ownership), [
 transport and tier 1b), [`tier1b-default.md`](docs/tier1b-default.md), [`transport-range-out.md`](docs/transport-range-out.md),
 [`fastreco.md`](docs/fastreco.md) (reco goals, V-R thresholds and results),
 [`response-configuration.md`](docs/response-configuration.md), [`e2e-benchmark.md`](docs/e2e-benchmark.md); opt-in
-features have their own page in `docs/`. [`docs/plan.md`](docs/plan.md) is the original 2026-10-15 plan (historical;
+features have their own page in `docs/`. Named conditional diagnostics: [response](docs/named-response.md),
+[conditions](docs/named-conditions.md), [receipts](docs/response-receipts.md) and [execution traces](docs/response-execution-trace.md).
+The [Run 1A pause handoff](docs/run1a-pause.md) records the unadmitted native library and pending build/readback gates. [`docs/plan.md`](docs/plan.md) is the original 2026-10-15 plan (historical;
 its goals and thresholds are still the agreed ones).
 
 ## Tests

@@ -411,9 +411,13 @@ def _bin_edges(step_paths, geom):
         x = _crossings(mu)
         xs.append(pd.DataFrame({"group": _group_index(geom, x.bar), "p": x.p.to_numpy(), "len": x.len.to_numpy()}))
     x = pd.concat(xs, ignore_index=True)
+    if x.empty or (x.group < 0).any():
+        raise ValueError("donors need primary-muon crossings in supported library groups")
     edges = []
     for gi in range(len(GROUPS)):
         xg = x[x.group == gi]
+        if xg.empty:
+            continue
         edges += [(0, gi, e) for e in np.quantile(xg.p, P_QUANTILES)]
         edges += [(1, gi, e) for e in np.quantile(xg.len, L_QUANTILES)]
     return pd.DataFrame(edges, columns=["kind", "group", "edge"]).astype({"kind": np.int64, "group": np.int64})
@@ -510,7 +514,7 @@ def _build_one(step_paths, geom, libbins, *, _already_validated=None, roots=Fals
             validated[f] = genassoc.validate_donor(f)
     steps = tables.read_many(step_paths, "steps")
     parts = tables.read_many(step_paths, "particles", KEY + ["key", "parent", "pdg", "isprim", "genidx"])
-    s = classify(steps, parts, geom.sector)
+    s = classify(steps, parts, geom.sector, getattr(geom, "lib_group", None))
     lib = {}
     # 1. muon descendants per crossing
     x = _crossings(s[s.cls == "mu_primary"])
@@ -953,11 +957,15 @@ def attach_anchors(lib, geom, scope="module"):
         cur, r = cur[cur >= 0], r + 1
     xid = ld.xid.to_numpy()
     _, mu = np.unique(g["mu"], return_inverse=True)
-    tkey = mu[xid].astype(np.int64) * (1 << 31) + ld.root.to_numpy()
+    roots = ld.root.to_numpy()
+    if roots.dtype.kind not in "iu" or np.any(roots < 0) or np.any(roots > np.iinfo(np.int64).max):
+        raise ValueError("anchor roots must be nonnegative int64-compatible identities")
+    tkey = np.column_stack([mu[xid], roots.astype(np.int64)])
     if scope == "module":
         b = np.asarray(g["bar"], np.int64)[xid]
-        tkey = np.unique(np.c_[tkey, geom.sector[b], geom.module[b]], axis=0, return_inverse=True)[1].ravel()
-    _, rid = np.unique(tkey, return_inverse=True)
+        tkey = np.column_stack([tkey, geom.sector[b], geom.module[b]])
+    _, rid = np.unique(tkey, axis=0, return_inverse=True)
+    rid = rid.ravel()
     move = ~ld.uv.to_numpy() if "uv" in ld.columns else np.ones(len(ld), bool)
     ro = rank[xid]
     head = np.full(int(rid.max()) + 1 if len(rid) else 0, np.iinfo(np.int64).max)
@@ -1385,8 +1393,8 @@ def group_boxes(geom):
     """Axis-aligned box (lo [4, 3], hi [4, 3]) of every library group's bars."""
     g = _group_index(geom, np.arange(geom.nbars))
     lo, hi = geom.center - geom.halflen, geom.center + geom.halflen
-    return (np.array([lo[g == i].min(0) for i in range(len(GROUPS))]),
-            np.array([hi[g == i].max(0) for i in range(len(GROUPS))]))
+    return (np.array([lo[g == i].min(0) if np.any(g == i) else np.full(3, np.inf) for i in range(len(GROUPS))]),
+            np.array([hi[g == i].max(0) if np.any(g == i) else np.full(3, -np.inf) for i in range(len(GROUPS))]))
 
 
 def closest_approach(pos, u, geom):
@@ -1396,9 +1404,13 @@ def closest_approach(pos, u, geom):
     pos, u = np.asarray(pos, float), _unit(np.asarray(u, float))
     lo, hi = group_boxes(geom)
     n, ng = len(pos), len(GROUPS)
-    dist, tbest = np.zeros((n, ng)), np.zeros((n, ng))
+    dist, tbest = np.full((n, ng), np.inf), np.full((n, ng), np.inf)
+    if not np.any(np.all(lo <= hi, axis=1)):
+        raise ValueError("geometry has no populated library group")
     with np.errstate(divide="ignore", invalid="ignore"):
         for gi in range(ng):
+            if np.any(lo[gi] > hi[gi]):
+                continue
             t1, t2 = (lo[gi] - pos) / u, (hi[gi] - pos) / u
             par = u == 0
             inside_slab = (pos >= lo[gi]) & (pos <= hi[gi])

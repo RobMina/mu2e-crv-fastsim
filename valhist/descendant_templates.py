@@ -43,7 +43,7 @@ def donor_pass(path, geom):
     steps = tables.read(path, "steps")
     parts = tables.read(path, "particles", PART_COLS)
     gen = tables.read(path, "gen", KEY + ["idx", "pdg", "x", "y", "z", "px", "py", "pz", "e", "t"])
-    s = classify(steps, parts, geom.sector)
+    s = classify(steps, parts, geom.sector, getattr(geom, "lib_group", None))
     mus = s.loc[s.cls.eq("mu_primary")]
     x = T._crossings(mus)
     # exit point of each crossing (last step end, the order of _crossings) for the opt-in chord placement
@@ -92,7 +92,7 @@ def next_crossing(mu, t0, offset=0):
 def census_pass(steps_path, gen_path, geom):
     """Generated muons of the events without a G4 primary-muon crossing: (group, dist, ke) per muon, and events."""
     steps, parts = S._read(steps_path, KEY + ["bar", "sp", "edep"])
-    s = classify(steps, parts, geom.sector)
+    s = classify(steps, parts, geom.sector, getattr(geom, "lib_group", None))
     crossed = pd.MultiIndex.from_frame(s.loc[s.cls.eq("mu_primary"), KEY].drop_duplicates().astype(np.int64))
     gen = tables.read(gen_path, "gen", KEY + ["idx", "pdg", "x", "y", "z", "px", "py", "pz", "e", "t"])
     mu = T.muon_rays(gen)
@@ -109,7 +109,8 @@ def sidecar(manifest, census_steps, census_gen, census_shards, out, counters=Non
     tick = time.monotonic()
     man = json.loads(Path(manifest).read_text())
     library = str(Path(manifest).with_suffix(".root"))
-    geom = geometry.from_offline_config(geometry.find_counters(counters or S.COUNTERS))
+    from crvfastsim.analyses.tier1b import _counters, _geom
+    geom = _geom(counters, man.get("run_config"))
     from mu2efastsim import tables as core_tables
     lx = core_tables.read(library, "libxing")
     bins = core_tables.read(library, "libbins")
@@ -200,7 +201,7 @@ def sidecar(manifest, census_steps, census_gen, census_shards, out, counters=Non
                **{f"nmc_{k}": nmc[k].to_numpy() for k in nmc.columns}}
     np.savez_compressed(out, **payload)
     result = {"library": library, "library_sha256": A.digest(library), "manifest": str(manifest),
-              "geometry_sha256": A.digest(geometry.find_counters(counters or S.COUNTERS)),
+              "geometry_sha256": A.digest(_counters(counters, man.get("run_config"))),
               "code_sha256": {p: A.digest(p) for p in (__file__, T.__file__)}, "donors": records, "census": crec,
               "generated": int(generated), "census_events": int(cev), "census_muons": int(cmu),
               "census_no_crossing_muons": int(len(nmc)), "nearmiss_templates": int(len(nmt)),

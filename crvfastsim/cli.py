@@ -100,6 +100,7 @@ def build_parser():
             sp.add_argument("--run-config", default=None, help="named run configuration: its counters file and one "
                             "group per sector type (default extracted_v04: EX, T1, T2, M)")
         if name == "tier1b-build":
+            sp.add_argument("--run-config", default=None, help="native library geometry and sector-to-library group map")
             sp.add_argument("--gen", nargs="+", default=None, metavar="ROOT", help="gen.*.root of the same shards")
             sp.add_argument("--out", default=None, metavar="ROOT", help="library file to write")
             sp.add_argument("--generated", type=int, default=None,
@@ -116,7 +117,7 @@ def build_parser():
             sp.add_argument("--tier1b", dest="tier1b_set", default=None, choices=sorted(T1B.SETS),
                             help=f"tier-1b asset set (library, placement sidecars and options; crvfastsim.tier1b_assets). "
                                  f"Default: {T1B.DEFAULT} for extracted_v04; the named run configurations have no set "
-                                 f"and need --library")
+                                 f"and need --library (ordinary runchain also accepts --native-library-dir)")
             sp.add_argument("--tier1b-dir", default=None, metavar="DIR",
                             help="directory with the set's files (default $CRVFS_DATA/<set directory>)")
         if name == "runchain":
@@ -127,6 +128,11 @@ def build_parser():
             sp.add_argument("--gen-subrun", type=int, default=1, help="native event subrun (default 1)")
             sp.add_argument("--library", default=None, metavar="ROOT",
                             help="custom tier-1b library, sampled without placement options (instead of --tier1b)")
+            sp.add_argument("--native-library-dir", default=None, metavar="DIR",
+                            help="explicit native builder output with checked sidecars and module anchors")
+            sp.add_argument("--native-output", default=None, metavar="NPZ",
+                            help="exclusive detailed ordinary native-chain record; not a benchmark or physics receipt")
+            sp.add_argument("--conditions-manifest", default=None, help="validated named-condition bundle manifest")
             sp.add_argument("--calib", default=None, metavar="CSV", help="CRVCalib + channel map CSV")
             sp.add_argument("--deviation", default=None, metavar="CSV", help="CRVPhoton deviations")
             sp.add_argument("--gdml", default=None, help="GDML world for stage C transport")
@@ -208,6 +214,8 @@ def build_parser():
             sp.add_argument("--compare-generated", type=int, default=None, help="generated events behind the reference")
         if name == "v2compare":
             sp.add_argument("--run-config", default=None, help="named geometry and all-sector V2 groups")
+            sp.add_argument("--candidate-receipt", help="prospective fasttable receipt; conditional integrity audit only")
+            sp.add_argument("--conditions-manifest", help="strict bundle for candidate receipt revalidation")
             sp.add_argument("--compare", nargs="+", default=None, metavar="ROOT",
                             help="reference arm CrvRecoTableDumper files")
             sp.add_argument("--steps", nargs="+", default=None, metavar="ROOT",

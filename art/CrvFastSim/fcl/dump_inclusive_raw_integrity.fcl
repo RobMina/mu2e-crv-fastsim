@@ -1,0 +1,19 @@
+# Saved-raw diagnostic readback only; schema and audit limits are in docs/native-raw-integrity.md.
+process_name : R3RawIntegrityDump
+source : { module_type : RootInput }
+services : {
+  TFileService : { fileName : "inclusive_raw_integrity.root" }
+}
+physics : {
+  analyzers : {
+    rawdump : {
+      module_type : CrvRawIntegrityDumper
+      genParticles : "cosmicTimeOffset::Primary"
+      simParticles : "g4run::R3Inclusive"
+      rawSteps : "g4run:CRV:R3Inclusive"
+      status : "g4run::R3Inclusive"
+    }
+  }
+  integrity : [ rawdump ]
+  end_paths : [ integrity ]
+}

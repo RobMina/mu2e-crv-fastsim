@@ -1,0 +1,23 @@
+# Read retained status and provenance independently of step-table extraction.
+#include "Offline/fcl/minimalMessageService.fcl"
+process_name : R3InclusiveAudit
+source : { module_type : RootInput }
+services : {
+  message : @local::default_message
+  GlobalConstantsService : { inputFile : "Offline/GlobalConstantsService/data/globalConstants_01.txt" }
+}
+physics : {
+  analyzers : {
+    status : {
+      module_type : PrintModule
+      verbose : 1
+      PrintEvent : true
+      PrintSubRun : false
+      statusG4Printer : { verbose : 1 inputTags : [ "g4run::R3Inclusive" ] }
+      triggerResultsPrinter : { verbose : 1 inputTags : [ "TriggerResults::R3Inclusive" ] }
+    }
+  }
+  inspect : [ status, productList ]
+  end_paths : [ inspect ]
+}
+outputs : { productList : { module_type : DataProductDump wantResolvedOnly : true } }

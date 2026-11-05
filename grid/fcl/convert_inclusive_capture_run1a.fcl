@@ -1,0 +1,20 @@
+# Configuration candidate only: audit saved raw input before separately approved conversion.
+#include "ref_inclusive_capture_run1a.fcl"
+process_name : R3InclusiveSteps
+physics.PrimaryPath : [ CrvSteps ]
+outputs : {
+  InclusiveOutput : {
+    module_type : RootOutput
+    fileName : "inclusive-converted-run1a.art"
+    outputCommands : [ "drop *_*_*_*",
+      "keep mu2e::GenParticles_cosmicTimeOffset__Primary",
+      "keep mu2e::CosmicLivetime_*_*_*",
+      "keep mu2e::GenEventCount_*_*_*",
+      "keep mu2e::SimParticlemv_g4run__R3Inclusive",
+      "keep mu2e::StatusG4_g4run__R3Inclusive",
+      "keep mu2e::StepPointMCs_g4run_CRV_R3Inclusive",
+      "keep art::TriggerResults_*_*_R3Inclusive",
+      "keep mu2e::CrvSteps_CrvSteps__R3InclusiveSteps",
+      "keep art::TriggerResults_*_*_R3InclusiveSteps" ]
+  }
+}

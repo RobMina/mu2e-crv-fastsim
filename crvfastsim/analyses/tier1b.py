@@ -14,6 +14,7 @@ tables carry their gen tree, which supplies the non-muon CRY primaries.
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -23,18 +24,55 @@ from .. import geometry, tables, tier1b, tier1b_assets
 DEFAULT_COUNTERS = "Offline/Mu2eG4/geom/crv_counters_extracted_v04.txt"
 
 
-def _geom(counters):
-    return geometry.from_offline_config(geometry.find_counters(counters or DEFAULT_COUNTERS))
+def _counters(counters=None, run_config=None):
+    if counters:
+        return geometry.find_counters(counters)
+    if run_config:
+        from .. import runconfig
+        return runconfig.get(run_config).counters_path()
+    return geometry.find_counters(DEFAULT_COUNTERS)
 
 
-def build(inputs, outdir, gen=None, out=None, generated=None, counters=None, roots=False, **kw):
+def _geom(counters, run_config=None):
+    if run_config:
+        from dataclasses import replace
+        from .. import runconfig
+        rc = runconfig.get(run_config)
+        return (replace(rc, counters=counters) if counters else rc).geometry()
+    return geometry.from_offline_config(_counters(counters))
+
+
+def build(inputs, outdir, gen=None, out=None, generated=None, counters=None, roots=False, run_config=None, **kw):
     if not gen or not out:
         raise SystemExit("tier1b-build needs --gen and --out")
-    lib, info = tier1b.build(tables.expand(inputs), tables.expand(gen), _geom(counters), generated=generated,
-                             roots=roots)
+    geom = _geom(counters, run_config)
+    identity = {}
+    inputs, gen = tables.expand(inputs), tables.expand(gen)
+    if run_config:
+        from .context_audit import content_fingerprint
+        from .. import native_training
+        inputs, gen = ([str(Path(path).resolve()) for path in paths] for paths in (inputs, gen))
+        training = native_training.validate(inputs, gen)
+        from .. import native_construction
+        construction = native_construction.require_supported(training)
+        if generated is not None and (type(generated) is not int or generated != training["total_exposure"]):
+            raise ValueError("native generated exposure must equal the complete disjoint training census")
+        generated = training["total_exposure"]
+        identity = {"geometry_fingerprint": content_fingerprint(geom, workers=1),
+                    "counters_sha256": _sha256(_counters(counters, run_config)), "training_census": training,
+                    "construction_support": construction}
+    lib, info = tier1b.build(inputs, gen, geom, generated=generated, roots=roots)
+    if identity and (identity["geometry_fingerprint"] != content_fingerprint(_geom(counters, run_config), workers=1)
+                     or identity["counters_sha256"] != _sha256(_counters(counters, run_config))):
+        raise ValueError("native build geometry changed during construction")
+    if run_config:
+        expected = {item[role]["path"]: item[role]["sha256"] for item in training["pairs"] for role in ("steps", "generator")}
+        if any(_sha256(path) != digest for path, digest in expected.items()):
+            raise ValueError("native training inputs changed during construction")
     tier1b.write_library(out, lib)
     with open(os.path.splitext(out)[0] + ".json", "w") as fh:
-        json.dump({"inputs": tables.expand(inputs), "gen": tables.expand(gen), **info}, fh, indent=2)
+        json.dump({"inputs": inputs, "gen": gen, "run_config": run_config,
+                   **identity, **info}, fh, indent=2)
     print(info)
 
 
