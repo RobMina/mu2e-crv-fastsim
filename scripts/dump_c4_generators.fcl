@@ -1,0 +1,7 @@
+# Read the retained upstream generators without steps or a full-stream exposure claim.
+#include "CrvFastSim/fcl/dump_crvsteps.fcl"
+physics.analyzers.dump.writeSteps : false
+physics.analyzers.dump.genParticles : "compressDetStepMCs::CosmicS2"
+physics.analyzers.dump.fullGeneratorStream : false
+physics.analyzers.dump.livetime : "CosmicResampler:mixed:CosmicS2"
+services.TFileService.fileName : "c4_generators.root"
