@@ -2,7 +2,7 @@
 
     python3 -m crvfastsim.analyses.runchain_bench gen.A.root gen.B.root ... --calib C [--deviation D]
         [--run-config run1a_v01] [--window offspill] [--gdml G] [--tier1b SET --tier1b-dir DIR | --library L]
-        [--seed 7] [--prefetch] [--compile-cache DIR] [--passes 3] --out bench.json [--outdir DIR]
+        [--seed 7] [--prefetch] [--resident-response] [--compile-cache DIR] [--passes 3] --out bench.json [--outdir DIR]
 
 The gen tables are read into host memory first (reported as prepare_s). Each pass is one runchain.run over all of
 them in this process (the multi-file stream: every file through transport, tier 1b, response and reco). The
@@ -31,6 +31,8 @@ def main(argv=None):
     p.add_argument("--library")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--prefetch", action="store_true")
+    p.add_argument("--resident-response", action="store_true",
+                   help="photons stay on the device into the SiPM stage (ChainConfig.resident_response)")
     p.add_argument("--compile-cache", metavar="DIR")
     p.add_argument("--passes", type=int, default=3)
     p.add_argument("--out", required=True, help="timer report JSON")
@@ -49,6 +51,8 @@ def main(argv=None):
     events = sum(int(g[tables.KEY].drop_duplicates().shape[0]) for g in gen_tables.values())
     setup = dict(library=a.library, calib=a.calib, deviation=a.deviation, gdml=a.gdml, jax=True,
                  run_config=a.run_config, window=a.window, tier1b_set=a.tier1b_set, tier1b_dir=a.tier1b_dir)
+    if a.resident_response:
+        setup["resident_response"] = True
     outdir = a.outdir or str(Path(a.out).with_suffix("")) + "_runchain"
     state = {}
 
