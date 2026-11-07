@@ -89,6 +89,13 @@ def _pulse_collect(outs, W, rows, cfg_np, device_refit=False, counts=None):
         sub = {k: np.concatenate([q[k] for q in parts]) for k in ("wf", "seq", "pe", "time")}
         if counts is not None:
             counts["pulse_device_refit"] = counts.get("pulse_device_refit", 0) + int(nredo - again.sum())
+        keep = ~redo[wf]
+        wf = np.concatenate([wf[keep], rr[sub["wf"]]])
+        seq = np.concatenate([seq[keep], sub["seq"]])
+        pe = np.concatenate([pe[keep], sub["pe"]])
+        tm = np.concatenate([tm[keep], sub["time"]])
+        o = np.lexsort((seq, wf))
+        wf, seq, pe, tm = wf[o], seq[o], pe[o], tm[o]
         nredo = int(again.sum())
     elif nredo:
         rr = np.flatnonzero(redo)
