@@ -188,8 +188,9 @@ def main(argv=None):
             if "setup" not in cached:
                 cached["setup"] = load_setup(*common)
             return one_pass(cached["setup"])
+        from mu2efastsim import precision
         report = bench.run(timed_pass, events, passes=args.passes, workflow="W5", boundary=BOUNDARY,
-                           prepare_s=prepare_s)
+                           prepare_s=prepare_s, dtype=precision.NAME)
         report["command"] = "python3 -m crvfastsim.veto.stream " + " ".join(argv if argv is not None else
                                                                              __import__("sys").argv[1:])
         Path(args.bench).write_text(json.dumps(report, indent=1) + "\n")
