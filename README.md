@@ -1,3 +1,5 @@
+> **Moved.** This repository is archived. The code now lives in [RobMina/mu2e-fastsim](https://github.com/RobMina/mu2e-fastsim), directory [`crv/`](https://github.com/RobMina/mu2e-fastsim/tree/main/crv), with the full history of this repository merged in (old pull requests, `#NN`, are linked from those commits as `RobMina/mu2e-crv-fastsim#NN`). Park and archive branches stay here, readable.
+
 # mu2e-crv-fastsim
 
 Geant4-free simulation and fast reconstruction of the Mu2e **Cosmic Ray Veto** for the extracted (KPP, no field)
